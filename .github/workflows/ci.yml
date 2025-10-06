@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install tools
+        run: |
+          python -m pip install -U pip
+          pip install ruff black mypy bandit pip-audit detect-secrets
+          pip install -r requirements.txt || true
+      - name: Ruff
+        run: ruff check .
+      - name: Black (check)
+        run: black --check .
+      - name: MyPy
+        run: mypy .
+      - name: Bandit
+        run: bandit -r .
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt || true
+      - name: Secret scan (baseline)
+        run: |
+          if [ -f .secrets.baseline ]; then detect-secrets scan --baseline .secrets.baseline ; else echo "no baseline"; fi
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: static
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_DATABASE: usaccidents
+          MYSQL_ROOT_PASSWORD: root
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      DB_URL: mysql+pymysql://root:root@127.0.0.1/usaccidents?charset=utf8mb4
+      LOG_LEVEL: INFO
+      DRIVETEXAS_API_KEY: ${{ secrets.DRIVETEXAS_API_KEY }}
+      POLL_SECONDS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install app deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt || true
+          pip install pytest pytest-asyncio httpx pymysql sqlalchemy python-dotenv coverage schemathesis
+      - name: Wait for MySQL
+        run: |
+          for i in {1..60}; do mysqladmin ping -h 127.0.0.1 -proot && break; sleep 2; done
+      - name: Unit & integration tests (with coverage)
+        run: |
+          pytest -q --maxfail=1 --disable-warnings --cov=usaccidents_app --cov-report=xml
+      - name: Contract test from OpenAPI (schemathesis)
+        run: |
+          nohup uvicorn usaccidents_app.main:app --port 8000 & sleep 3
+          schemathesis run http://127.0.0.1:8000/openapi.json --checks all --hypothesis-deadline=500
+
+  dast:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Start app in background
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt || true
+          pip install uvicorn
+          nohup uvicorn usaccidents_app.main:app --port 8000 & echo $! > app.pid
+          sleep 4
+      - name: ZAP Baseline (DAST)
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: 'http://host.docker.internal:8000'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stop app
+        run: kill $(cat app.pid) || true

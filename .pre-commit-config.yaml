@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: validate-headers
+        name: validate headers
+        entry: python scripts/validate_headers-1.py
+        language: system
+        files: '\.(py|sh)$'

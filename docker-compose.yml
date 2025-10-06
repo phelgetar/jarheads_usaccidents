@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: jarheads_accidents
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    healthcheck:
+      test: ["CMD","mysqladmin","ping","-h","127.0.0.1","-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://app:app@db:3306/jarheads_accidents?charset=utf8mb4
+      OHGO_API_KEY: ${OHGO_API_KEY:-}
+      OHGO_BASE_URL: ${OHGO_BASE_URL:-https://api.ohgo.com/v1}
+      OHGO_INCIDENTS_PATH: ${OHGO_INCIDENTS_PATH:-/incidents}
+      OHGO_ROADS_PATH: ${OHGO_ROADS_PATH:-/roads}
+    ports:
+      - "8000:8000"
+    command: ["uvicorn","usaccidents_app.main:app","--host","0.0.0.0","--port","8000"]
+volumes:
+  mysql_data:
