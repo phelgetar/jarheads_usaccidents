@@ -1,0 +1,54 @@
+#
+###################################################################
+# Project: USAccidents
+# File: scripts/validate_headers.py
+# Purpose: See module docstring or code comments.
+#
+# Author: Tim Canady
+# Created: 2025-09-28
+#
+# Version: 0.1.1
+# Last Modified: 2025-09-30 by Tim Canady
+#
+# Revision History:
+# - 0.1.1 (2025-09-30): Fix scheduler bug
+###################################################################
+#
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HEADER_RE = re.compile(r"(?s)^\#\n#{67}\n.*?\n#{67}\n\#\n")
+
+def get_staged_files():
+    out = subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True)
+    return [Path(p) for p in out.splitlines() if p]
+
+def main():
+    bad = []
+    for p in get_staged_files():
+        if p.suffix not in {".py", ".sh"}:
+            continue
+        if not p.exists():
+            continue
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        if p.suffix == ".sh" and text.startswith("#!"):
+            text_no_shebang = "\n".join(text.splitlines()[1:]) + ("\n" if text.endswith("\n") else "")
+            ok = bool(HEADER_RE.match(text_no_shebang))
+        else:
+            ok = bool(HEADER_RE.match(text))
+        if not ok:
+            bad.append(str(p))
+    if bad:
+        print("✖ Pre-commit blocked: missing/invalid headers in:")
+        for b in bad:
+            print("  -", b)
+        print("\nTip: run `python scripts/apply_headers.py \"<summary>\"`")
+        sys.exit(1)
+    print("✔ Headers OK")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

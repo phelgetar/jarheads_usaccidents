@@ -13,8 +13,7 @@
 # Last Modified: 2025-10-04 by Tim Canady
 #
 # Revision History:
-# - 0.4.1 (2025-10-04): Auto-synced update — Tim Canady
-# - 0.4.0 (2025-10-04): Initial version — Tim Canady
+# - 0.1.0 (2025-10-04): Initial version — Tim Canady
 ###################################################################
 #
 
