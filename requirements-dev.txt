@@ -1,0 +1,17 @@
+# Dev/test toolchain
+ruff
+black
+mypy
+bandit
+pip-audit
+detect-secrets
+pytest
+pytest-asyncio
+pytest-cov
+coverage
+schemathesis
+httpx
+pymysql
+sqlalchemy
+python-dotenv
+uvicorn

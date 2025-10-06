@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+###################################################################
+# Project: USAccidents
+# File: .githooks/pre-commit
+#
+# Author: Tim Canady
+# Date: Sep 2025
+#
+# Description:
+#   Block commit if any changed .py file is missing the standard header.
+#
+# Version: 0.1.0
+#
+# Revision History
+# - 0.1.0 (2025-09-30): Initial — Tim Canady
+###################################################################
+#
+
+mkdir -p .githooks
+cat > .githooks/pre-commit <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python scripts/validate_headers.py
+EOF
+chmod +x .githooks/pre-commit
+git config core.hooksPath .githooks
+
+#set -euo pipefail
+#
+#CHANGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
+#if [ -z "$CHANGED" ]; then
+#  exit 0
+#fi
+#
+#python scripts/validate_headers.py $CHANGED --ext .py
