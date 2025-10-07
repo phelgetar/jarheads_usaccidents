@@ -3,27 +3,31 @@
 ###################################################################
 # Project: USAccidents
 # File: usaccidents_app/connectors/ohio.py
-# Purpose: OHGO connector and ingest helpers (robust URL building)
+# Purpose: OHGO connector and ingest helpers (robust URL building & JSON handling).
 #
 # Description of code and how it works:
 # - Builds URLs safely from base + path without duplicating segments.
-# - Tries Authorization header first, falls back to query param.
-# - On 404 with a known duplicate-pattern (e.g., /incidents/incidents), retries once.
+# - Tries Authorization header first, falls back to query param (?api-key=).
+# - Normalizes payloads into a list of dicts to avoid 'str' item crashes.
+# - Retries once on a 404 caused by duplicated path segments (/incidents/incidents).
 #
 # Author: Tim Canady
 # Created: 2025-09-28
 #
-# Version: 0.6.1
+# Version: 0.6.2
 # Last Modified: 2025-10-06 by Tim Canady
 #
 # Revision History:
+# - 0.6.2 (2025-10-06): Hardened parsing to avoid 'str' item errors.
 # - 0.6.1 (2025-10-06): Robust _build_url; 404 dedup retry; light debug.
 # - 0.6.0 (2025-10-04): Header→query auth fallback.
 # - 0.5.0 (2025-09-28): Initial connector.
 ###################################################################
 #
-from typing import Dict, List, Optional
+
+from typing import Dict, List, Optional, Any
 import os
+import json
 import httpx
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -41,45 +45,66 @@ APP_ENV = os.getenv("APP_ENV", "local").lower()
 
 
 def _build_url(base: str, path: Optional[str]) -> str:
+    """Build a URL by safely joining a base and a path without duplicating trailing segments."""
     base = (base or "").strip()
-    if not base:
-        raise ValueError("OHGO_BASE_URL is required")
     if not base.startswith(("http://", "https://")):
         base = "https://" + base.lstrip("/")
     base = base.rstrip("/")
-
     seg = (path or "").strip()
-    if seg == "":
-        return base
-    seg = "/" + seg.lstrip("/")
-
-    # If base already ends with seg, don't duplicate
-    if base.lower().endswith(seg.lower()):
-        return base
-
-    # If last segment equals seg, skip append
-    base_last = "/" + base.rsplit("/", 1)[-1].lower()
-    if base_last == seg.lower():
-        return base
-
-    return base + seg
+    if seg:
+        seg = "/" + seg.lstrip("/")
+        # If base already ends with seg or last segment equals seg, do not append.
+        if base.lower().endswith(seg.lower()):
+            return base
+        if ("/" + base.rsplit("/", 1)[-1].lower()) == seg.lower():
+            return base
+        base = base + seg
+    return base
 
 
-async def _get_json(url: str, params: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None):
+async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Any:
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, params=params or {}, headers=headers or {})
         if resp.status_code in (401, 403) and OHGO_API_KEY:
             qp = dict(params or {})
             qp["api-key"] = OHGO_API_KEY
             resp = await client.get(url, params=qp)
-        # If 404 and a common duplication is present, retry once without duplication
-        if resp.status_code == 404:
-            url_str = str(resp.request.url)
-            if "/incidents/incidents" in url_str:
-                rebound = url_str.replace("/incidents/incidents", "/incidents")
-                resp = await client.get(rebound, params=params or {}, headers=headers or {})
+
+        # Known duplication retry (e.g., /incidents/incidents)
+        if resp.status_code == 404 and "/incidents/incidents" in str(resp.request.url):
+            rebound = str(resp.request.url).replace("/incidents/incidents", "/incidents")
+            resp = await client.get(rebound, params=params or {}, headers=headers or {})
+
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except Exception:
+            try:
+                return json.loads(resp.text)
+            except Exception:
+                if APP_ENV in ("local", "dev", "debug"):
+                    print(f"[OHGO] Non-JSON response from {url[:120]}... -> returning []")
+                return []
+
+
+def _as_items(data: Any) -> List[Dict[str, Any]]:
+    """Normalize various possible payload shapes into a list of dicts."""
+    if isinstance(data, dict):
+        candidate = data.get("items", data.get("data", data.get("results", data)))
+        if isinstance(candidate, list):
+            return [x for x in candidate if isinstance(x, dict)]
+        elif isinstance(candidate, dict):
+            return [candidate]
+        return []
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return _as_items(parsed)
+        except Exception:
+            return []
+    return []
 
 
 def _auth() -> Dict[str, Dict[str, str]]:
@@ -91,19 +116,21 @@ def _auth() -> Dict[str, Dict[str, str]]:
     return {"headers": headers, "params": params}
 
 
-async def fetch_ohgo_incidents(page_size: int = 100) -> List[Dict]:
+async def fetch_ohgo_incidents(page_size: int = 100) -> List[Dict[str, Any]]:
     url = _build_url(OHGO_BASE_URL, OHGO_INCIDENTS_PATH)
     auth = _auth()
     data = await _get_json(url, params={"pageSize": page_size}, headers=auth["headers"])
-    items = data.get("items", data)
+    items = _as_items(data)
     if APP_ENV in ("local", "dev", "debug"):
         print(f"[OHGO] fetched {len(items)} incidents from {url}")
     return items
 
 
-def ingest_ohio_incidents(db: Session, items: List[Dict]) -> int:
+def ingest_ohio_incidents(db: Session, items: List[Dict[str, Any]]) -> int:
     count = 0
     for item in items:
+        if not isinstance(item, dict):
+            continue  # skip bad shapes defensively
         uuid = item.get("uuid") or f"ohgo:{item.get('id') or item.get('eventId')}"
         source_event_id = str(item.get("id") or item.get("eventId") or "")
         state = item.get("state") or "OH"
@@ -158,24 +185,24 @@ def ingest_ohio_incidents(db: Session, items: List[Dict]) -> int:
     return count
 
 
-async def fetch_ohgo_roads() -> List[Dict]:
+async def fetch_ohgo_roads() -> List[Dict[str, Any]]:
     url = _build_url(OHGO_BASE_URL, OHGO_ROADS_PATH)
     auth = _auth()
     data = await _get_json(url, headers=auth["headers"])
-    items = data.get("items", data)
+    items = _as_items(data)
     if APP_ENV in ("local", "dev", "debug"):
         print(f"[OHGO] fetched {len(items)} roads from {url}")
     return items
 
 
-def ingest_ohgo_roads(db: Session, items: List[Dict]) -> int:
+def ingest_ohgo_roads(db: Session, items: List[Dict[str, Any]]) -> int:
     count = 0
     for item in items:
+        if not isinstance(item, dict):
+            continue
         source_system = "OHGO"
         road_id = str(item.get("id") or item.get("roadId"))
-        existing = db.query(Road).filter(
-            Road.source_system == source_system, Road.road_id == road_id
-        ).one_or_none()
+        existing = db.query(Road).filter(Road.source_system == source_system, Road.road_id == road_id).one_or_none()
         common = dict(
             name=item.get("name"),
             description=item.get("description"),

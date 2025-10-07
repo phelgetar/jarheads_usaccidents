@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 #
 ###################################################################
 # Project: USAccidents Ingestor MVP
@@ -7,31 +8,15 @@
 # Author: Tim Canady
 # Created: 2025-10-04
 #
-# Version: 0.4.1
-# Last Modified: 2025-10-04 by Tim Canady
-#
-# Revision History:
-# - 0.4.1 (2025-10-04): Auto-synced update — Tim Canady
-# - 0.4.0 (2025-10-04): Initial version — Tim Canady
-###################################################################
-#
-#!/usr/bin/env bash
-#
-###################################################################
-# Project: USAccidents
-# File: scripts/backup_files.sh
-#
-# Author: Tim Canady
-# Date: Sep 2025
-#
 # Description:
 #   Create compressed filesystem backups of the project directory.
 #   Rotates daily and snapshot backups, keeping only N most recent.
 #
 # Version: 0.4.1
+# Last Modified: 2025-10-04 by Tim Canady
 #
-# Revision History
-# - 0.1.0 (2025-09-30): Initial — Tim Canady
+# Revision History:
+# - 0.1.0 (2025-10-06): Initial version — Tim Canady
 ###################################################################
 #
 

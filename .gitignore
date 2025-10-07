@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.env
+.env.*
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+*.bak
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & dumps
+*.log
+*.sql
+*.sql.gz
+
+# Alembic artifacts
+alembic/versions/*.pyc
+
+# Docker/runtime
+*.pid

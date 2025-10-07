@@ -1,0 +1,322 @@
+F401 [*] `sqlalchemy` imported but unused
+  --> alembic/versions/0001_init.py:25:22
+   |
+23 | #
+24 | from alembic import op
+25 | import sqlalchemy as sa
+   |                      ^^
+26 |
+27 | revision = "0001_init"
+   |
+help: Remove unused import: `sqlalchemy`
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:35:21
+   |
+33 |     try:
+34 |         op.create_index("idx_state_route", "incidents", ["state","route"], unique=False)
+35 |     except Exception: pass
+   |                     ^
+36 |     try:
+37 |         op.create_index("idx_reported_time", "incidents", ["reported_time"], unique=False)
+   |
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:38:21
+   |
+36 |     try:
+37 |         op.create_index("idx_reported_time", "incidents", ["reported_time"], unique=False)
+38 |     except Exception: pass
+   |                     ^
+39 |     try:
+40 |         op.create_index("idx_updated_time", "incidents", ["updated_time"], unique=False)
+   |
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:41:21
+   |
+39 |     try:
+40 |         op.create_index("idx_updated_time", "incidents", ["updated_time"], unique=False)
+41 |     except Exception: pass
+   |                     ^
+42 |     try:
+43 |         op.create_unique_constraint("ix_incidents_uuid", "incidents", ["uuid"])
+   |
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:44:21
+   |
+42 |     try:
+43 |         op.create_unique_constraint("ix_incidents_uuid", "incidents", ["uuid"])
+44 |     except Exception: pass
+   |                     ^
+45 |
+46 | def downgrade():
+   |
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:49:21
+   |
+47 |     try:
+48 |         op.drop_constraint("ix_incidents_uuid","incidents", type_="unique")
+49 |     except Exception: pass
+   |                     ^
+50 |     for idx in ["idx_updated_time","idx_reported_time","idx_state_route"]:
+51 |         try:
+   |
+
+E701 Multiple statements on one line (colon)
+  --> alembic/versions/0001_init.py:53:25
+   |
+51 |         try:
+52 |             op.drop_index(idx, table_name="incidents")
+53 |         except Exception: pass
+   |                         ^
+   |
+
+E401 [*] Multiple imports on one line
+  --> scripts/apply_headers.py:24:1
+   |
+22 | ###################################################################
+23 | #
+24 | import os, re, datetime
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+25 |
+26 | ROOT = os.path.dirname(os.path.dirname(__file__))
+   |
+help: Split imports
+
+F401 [*] `re` imported but unused
+  --> scripts/apply_headers.py:24:12
+   |
+22 | ###################################################################
+23 | #
+24 | import os, re, datetime
+   |            ^^
+25 |
+26 | ROOT = os.path.dirname(os.path.dirname(__file__))
+   |
+help: Remove unused import
+
+F401 [*] `datetime` imported but unused
+  --> scripts/apply_headers.py:24:16
+   |
+22 | ###################################################################
+23 | #
+24 | import os, re, datetime
+   |                ^^^^^^^^
+25 |
+26 | ROOT = os.path.dirname(os.path.dirname(__file__))
+   |
+help: Remove unused import
+
+F401 [*] `typing.Tuple` imported but unused
+  --> scripts/bump_file_versions.py:35:32
+   |
+33 | import yaml
+34 | import re
+35 | from typing import Dict, List, Tuple, Optional
+   |                                ^^^^^
+36 |
+37 | REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+   |
+help: Remove unused import: `typing.Tuple`
+
+E401 [*] Multiple imports on one line
+  --> scripts/bump_version.py:24:1
+   |
+22 | ###################################################################
+23 | #
+24 | import yaml, subprocess, os
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+25 | from datetime import datetime
+   |
+help: Split imports
+
+F401 [*] `subprocess` imported but unused
+  --> scripts/bump_version.py:24:14
+   |
+22 | ###################################################################
+23 | #
+24 | import yaml, subprocess, os
+   |              ^^^^^^^^^^
+25 | from datetime import datetime
+   |
+help: Remove unused import: `subprocess`
+
+E702 Multiple statements on one line (semicolon)
+  --> scripts/bump_version.py:37:19
+   |
+35 |     major, minor, patch = [int(x) for x in ver.split(".")]
+36 |     if part == "major":
+37 |         major += 1; minor = 0; patch = 0
+   |                   ^
+38 |     elif part == "minor":
+39 |         minor += 1; patch = 0
+   |
+
+E702 Multiple statements on one line (semicolon)
+  --> scripts/bump_version.py:37:30
+   |
+35 |     major, minor, patch = [int(x) for x in ver.split(".")]
+36 |     if part == "major":
+37 |         major += 1; minor = 0; patch = 0
+   |                              ^
+38 |     elif part == "minor":
+39 |         minor += 1; patch = 0
+   |
+
+E702 Multiple statements on one line (semicolon)
+  --> scripts/bump_version.py:39:19
+   |
+37 |         major += 1; minor = 0; patch = 0
+38 |     elif part == "minor":
+39 |         minor += 1; patch = 0
+   |                   ^
+40 |     else:
+41 |         patch += 1
+   |
+
+F401 [*] `os` imported but unused
+  --> scripts/cleanup.py:40:8
+   |
+38 | #
+39 |
+40 | import os
+   |        ^^
+41 | import shutil
+   |
+help: Remove unused import: `os`
+
+F401 [*] `shutil` imported but unused
+  --> scripts/cleanup.py:41:8
+   |
+40 | import os
+41 | import shutil
+   |        ^^^^^^
+42 |
+43 | def main():
+   |
+help: Remove unused import: `shutil`
+
+E402 Module level import not at top of file
+  --> scripts/cleanup.py:55:1
+   |
+55 | from usaccidents_app.database import SessionLocal
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+56 | from usaccidents_app import models
+   |
+
+E402 Module level import not at top of file
+  --> scripts/cleanup.py:56:1
+   |
+55 | from usaccidents_app.database import SessionLocal
+56 | from usaccidents_app import models
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+57 |
+58 | def remove_mock_events():
+   |
+
+F401 [*] `sys` imported but unused
+  --> scripts/init_versions.py:39:8
+   |
+37 | #
+38 | import pathlib
+39 | import sys
+   |        ^^^
+40 | import datetime
+41 | import yaml
+   |
+help: Remove unused import: `sys`
+
+F401 [*] `datetime` imported but unused
+  --> scripts/init_versions.py:40:8
+   |
+38 | import pathlib
+39 | import sys
+40 | import datetime
+   |        ^^^^^^^^
+41 | import yaml
+   |
+help: Remove unused import: `datetime`
+
+E701 Multiple statements on one line (colon)
+  --> scripts/safe_header_apply.py:54:17
+   |
+53 |     base = ["python", "scripts/apply_headers.py"] + args.paths + ["--ext"] + args.ext
+54 |     if args.date:    base += ["--date", args.date]
+   |                 ^
+55 |     if args.version: base += ["--version", args.version]
+56 |     if args.author:  base += ["--author", args.author]
+   |
+
+E701 Multiple statements on one line (colon)
+  --> scripts/safe_header_apply.py:55:20
+   |
+53 |     base = ["python", "scripts/apply_headers.py"] + args.paths + ["--ext"] + args.ext
+54 |     if args.date:    base += ["--date", args.date]
+55 |     if args.version: base += ["--version", args.version]
+   |                    ^
+56 |     if args.author:  base += ["--author", args.author]
+   |
+
+E701 Multiple statements on one line (colon)
+  --> scripts/safe_header_apply.py:56:19
+   |
+54 |     if args.date:    base += ["--date", args.date]
+55 |     if args.version: base += ["--version", args.version]
+56 |     if args.author:  base += ["--author", args.author]
+   |                   ^
+57 |
+58 |     print("=== DRY RUN ===")
+   |
+
+F401 [*] `re` imported but unused
+  --> scripts/validate_headers-1.py:23:8
+   |
+21 | import subprocess
+22 | import sys
+23 | import re
+   |        ^^
+24 |
+25 | REQUIRED_LINES = [
+   |
+help: Remove unused import: `re`
+
+E401 [*] Multiple imports on one line
+  --> scripts/validate_headers.py:24:1
+   |
+22 | ###################################################################
+23 | #
+24 | import sys, re
+   | ^^^^^^^^^^^^^^
+25 |
+26 | SHELL_RE = re.compile(r"\A#!/usr/bin/env bash\n#\n###################################################################\n# Project: USAc…
+   |
+help: Split imports
+
+F401 [*] `typing.List` imported but unused
+  --> usaccidents_app/schemas.py:24:35
+   |
+22 | ###################################################################
+23 | #
+24 | from typing import Optional, Any, List
+   |                                   ^^^^
+25 | from pydantic import BaseModel
+   |
+help: Remove unused import: `typing.List`
+
+F401 [*] `re` imported but unused
+  --> validate_headers.py:22:8
+   |
+20 | import subprocess
+21 | import sys
+22 | import re
+   |        ^^
+23 |
+24 | REQUIRED_LINES = [
+   |
+help: Remove unused import: `re`
+
+Found 29 errors.
+[*] 15 fixable with the `--fix` option.

@@ -3,11 +3,13 @@
 ###################################################################
 # Project: USAccidents
 # File: usaccidents_app/main.py
-# Purpose: FastAPI app, endpoints, scheduler for periodic Ohio ingestion
+# Purpose: FastAPI app, endpoints, scheduler for periodic Ohio ingestion.
 #
 # Description of code and how it works:
 # - Schedules a coroutine job every 1 minute by passing the coroutine directly.
 # - Wraps job body in try/except to avoid noisy stacktraces on transient HTTP issues.
+# - Provides endpoints: /healthz, /incidents/latest, /incidents/changed_since,
+#   /ingest/ohio/fetch, /ingest/ohio/roads.
 #
 # Author: Tim Canady
 # Created: 2025-09-28
@@ -16,10 +18,11 @@
 # Last Modified: 2025-10-06 by Tim Canady
 #
 # Revision History:
-# - 0.6.1 (2025-10-06): Safe logging in scheduled job.
+# - 0.6.1 (2025-10-06): Safe logging in scheduled job; MySQL-safe ordering helper.
 # - 0.6.0 (2025-10-04): Initial endpoints + scheduler.
 ###################################################################
 #
+
 from fastapi import FastAPI, Depends, Query
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -29,7 +32,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .database import get_db
 from .models import Incident
 from .schemas import IncidentOut
-from .connectors.ohio import fetch_ohgo_incidents, ingest_ohio_incidents, fetch_ohgo_roads, ingest_ohgo_roads
+from .connectors.ohio import (
+    fetch_ohgo_incidents,
+    ingest_ohio_incidents,
+    fetch_ohgo_roads,
+    ingest_ohgo_roads,
+)
 
 app = FastAPI(title="usaccidents_app")
 scheduler: Optional[AsyncIOScheduler] = None
@@ -50,8 +58,10 @@ async def _startup():
             finally:
                 db.close()
         except Exception as e:
+            # keep it quiet but visible
             print(f"[Scheduler] OHGO ingest error: {e}")
 
+    # pass the coroutine directly (no asyncio.create_task)
     scheduler.add_job(_scheduled_ohio_ingest, "interval", minutes=1)
     scheduler.start()
 
@@ -73,12 +83,11 @@ def _mysql_nulls_last_desc(col):
 
 
 @app.get("/incidents/latest", response_model=List[IncidentOut])
-async def incidents_latest(limit: int = Query(25, ge=1, le=200), db: Session = Depends(get_db)):
-    q = (
-        db.query(Incident)
-        .order_by(*_mysql_nulls_last_desc(Incident.reported_time))
-        .limit(limit)
-    )
+async def incidents_latest(
+    limit: int = Query(25, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Incident).order_by(*_mysql_nulls_last_desc(Incident.reported_time)).limit(limit)
     return q.all()
 
 
