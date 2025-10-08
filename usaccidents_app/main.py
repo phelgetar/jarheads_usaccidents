@@ -3,47 +3,68 @@
 ###################################################################
 # Project: USAccidents
 # File: usaccidents_app/main.py
-# Purpose: FastAPI app with API, scheduler, and web UI mounting.
+# Purpose: FastAPI app (incidents API, OHGO ingest, and collector)
 #
 # Description of code and how it works:
-# - Includes /web/incidents (HTML) and /api/incidents (JSON filters) via webui router.
-# - Mounts /static for assets.
-# - Scheduler runs OHGO ingest every minute by passing coroutine directly.
+# - Scheduler: AsyncIOScheduler calls ingest coroutine directly every minute.
+# - MySQL-safe ordering helpers for latest/changed_since.
+# - Endpoints to ingest incidents/roads and to collect all OHGO resources.
 #
 # Author: Tim Canady
 # Created: 2025-09-28
 #
-# Version: 0.7.0
-# Last Modified: 2025-10-07 by Tim Canady
+# Version: 0.9.1
+# Last Modified: 2025-10-08 by Tim Canady
 #
 # Revision History:
-# - 0.7.0 (2025-10-07): Mount web UI and /api/incidents endpoint; /static files served.
+# - 0.9.1 (2025-10-08): Switch to ingest_ohgo_* names.
+# - 0.9.0 (2025-10-08): Add /collect/ohio with resilient collectors; minor refactors.
+# - 0.8.0 (2025-10-08): Expose OHGO filters on ingest endpoint; default page_all=true.
+# - 0.7.0 (2025-10-08): Add /ingest detail flag; robust startup scheduler.
 ###################################################################
 #
-from fastapi import FastAPI, Depends, Query
 from typing import List, Optional
+from fastapi import FastAPI, Depends, Query
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import case, desc
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 import os
 
 from .database import get_db
 from .models import Incident
 from .schemas import IncidentOut
-from .connectors.ohio import fetch_ohgo_incidents, ingest_ohio_incidents, fetch_ohgo_roads, ingest_ohgo_roads
-from .webui import router as web_router
+from .connectors.ohio import (
+    fetch_ohgo_incidents,
+    ingest_ohgo_incidents,   # <-- renamed
+    fetch_ohgo_roads,
+    ingest_ohgo_roads,       # <-- renamed
+    fetch_ohgo_all,
+)
 
 app = FastAPI(title="usaccidents_app")
 scheduler: Optional[AsyncIOScheduler] = None
 
-# Mount static
-STATIC_DIR = os.getenv("USACCIDENTS_STATIC", "static")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATIC_DIR = os.getenv("USACCIDENTS_STATIC", str(PROJECT_ROOT / "static"))
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Include web UI router
-app.include_router(web_router)
+# Optional web UI (if present)
+try:
+    from .webui import router as web_router  # type: ignore
+except Exception:
+    web_router = None
+else:
+    app.include_router(web_router)
+
+@app.get("/")
+async def _root():
+    if web_router:
+        return RedirectResponse(url="/web/incidents", status_code=302)
+    return {"message": "USAccidents API"}
 
 @app.on_event("startup")
 async def _startup():
@@ -51,17 +72,19 @@ async def _startup():
     scheduler = AsyncIOScheduler()
 
     async def _scheduled_ohio_ingest():
+        # Import here to avoid circular
         from .database import SessionLocal
         try:
-            items = await fetch_ohgo_incidents(page_size=100)
+            items = await fetch_ohgo_incidents(page_all=True)
             db = SessionLocal()
             try:
-                ingest_ohio_incidents(db, items)
+                ingest_ohgo_incidents(db, items, return_detail=False)  # <-- renamed
             finally:
                 db.close()
         except Exception as e:
             print(f"[Scheduler] OHGO ingest error: {e}")
 
+    # Pass the coroutine directly (no asyncio.create_task)
     scheduler.add_job(_scheduled_ohio_ingest, "interval", minutes=1)
     scheduler.start()
 
@@ -70,26 +93,25 @@ async def _shutdown():
     if scheduler:
         scheduler.shutdown(wait=False)
 
+def _mysql_nulls_last_desc(col):
+    # Emulate NULLS LAST for MySQL
+    return (case((col.is_(None), 1), else_=0), desc(col))
+
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
 
-# MySQL-safe ordering: emulate NULLS LAST by ordering on IS NULL first
-def _mysql_nulls_last_desc(col):
-    return (case((col.is_(None), 1), else_=0), desc(col))
-
 @app.get("/incidents/latest", response_model=List[IncidentOut])
-async def incidents_latest(limit: int = Query(25, ge=1, le=200), db: Session = Depends(get_db)):
-    q = (
-        db.query(Incident)
-        .order_by(*_mysql_nulls_last_desc(Incident.reported_time))
-        .limit(limit)
-    )
+async def incidents_latest(
+    limit: int = Query(25, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Incident).order_by(*_mysql_nulls_last_desc(Incident.reported_time)).limit(limit)
     return q.all()
 
 @app.get("/incidents/changed_since", response_model=List[IncidentOut])
 async def incidents_changed_since(
-    since: Optional[str] = Query(None, description="ISO timestamp of last update"),
+    since: Optional[str] = Query(None, description="ISO timestamp (e.g., 2025-10-01T00:00:00Z)"),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
@@ -105,13 +127,68 @@ async def incidents_changed_since(
     return q.all()
 
 @app.post("/ingest/ohio/fetch")
-async def ingest_ohio_fetch(db: Session = Depends(get_db), page_size: int = 100):
-    items = await fetch_ohgo_incidents(page_size=page_size)
-    n = ingest_ohio_incidents(db, items)
-    return {"ingested": n}
+async def ingest_ohgo_fetch(  # route path kept the same for compatibility
+    db: Session = Depends(get_db),
+    page_size: int = Query(500, ge=1, le=2000, description="Ignored when page_all=true"),
+    page_all: bool = Query(True, description="Use OHGO page-all to fetch complete set"),
+    region: Optional[str] = Query(None, description="e.g., 'columbus,cleveland' or 'ne-ohio'"),
+    bounds_sw: Optional[str] = Query(None, description="lat,lon (south-west corner)"),
+    bounds_ne: Optional[str] = Query(None, description="lat,lon (north-east corner)"),
+    radius: Optional[str] = Query(None, description="lat,lon,miles"),
+    detail: bool = Query(True, description="Return inserted/updated/skipped when true"),
+):
+    items = await fetch_ohgo_incidents(
+        page_size=page_size,
+        page_all=page_all,
+        region=region,
+        bounds_sw=bounds_sw,
+        bounds_ne=bounds_ne,
+        radius=radius,
+    )
+    result = ingest_ohgo_incidents(db, items, return_detail=detail)  # <-- renamed
+    return {
+        "ok": True,
+        "filters": {"page_all": page_all, "region": region, "bounds_sw": bounds_sw, "bounds_ne": bounds_ne, "radius": radius},
+        "result": (result if isinstance(result, dict) else {"processed": int(result)}),
+    }
 
 @app.post("/ingest/ohio/roads")
-async def ingest_ohio_roads(db: Session = Depends(get_db)):
+async def ingest_ohgo_roads_endpoint(  # route path kept the same
+    db: Session = Depends(get_db)
+):
     items = await fetch_ohgo_roads()
-    n = ingest_ohgo_roads(db, items)
-    return {"ingested": n}
+    n = ingest_ohgo_roads(db, items)  # <-- renamed
+    return {"ok": True, "ingested": n}
+
+@app.get("/collect/ohio")
+async def collect_ohio(
+    detail: bool = False,
+    include: Optional[List[str]] = Query(
+        None,
+        description=("Subset of: incidents,construction,digital_signs,cameras,travel_delays,"
+                     "dangerous_slowdowns,truck_parking,weather_sensor_sites,work_zones_wzdx")
+    ),
+    region: Optional[str] = None,
+    bounds_sw: Optional[str] = None,
+    bounds_ne: Optional[str] = None,
+    radius: Optional[str] = None,
+):
+    from .connectors.ohio import fetch_ohgo_all
+    data = await fetch_ohgo_all(
+        page_all=True,
+        region=region,
+        bounds_sw=bounds_sw,
+        bounds_ne=bounds_ne,
+        radius=radius,
+        include=include,
+    )
+    counts = {k: (len(v) if isinstance(v, list) else ("FeatureCollection" if isinstance(v, dict) else "object"))
+              for k, v in data.items()}
+    resp = {
+        "ok": True,
+        "filters": {"page_all": True, "region": region, "bounds_sw": bounds_sw, "bounds_ne": bounds_ne, "radius": radius},
+        "counts": counts,
+    }
+    if detail:
+        resp["data"] = data
+    return resp
