@@ -20,3 +20,13 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
+
+exclude: >-
+  (?x)(
+    ^alembic\.bak_.*/        |  # ignore all Alembic backup directories
+    ^node_modules/           |  # ignore vendor files
+    \.zip$                   |  # ignore zipped artifacts
+    ^alembic_min_bundle_retry/|
+    ^alembic_min/            |
+    ^nbproject/
+  )

@@ -1,0 +1,18 @@
+Apply fix steps:
+
+1) Replace your project files with these:
+   - usaccidents_app/models.py
+   - usaccidents_app/connectors/ohio.py
+
+2) Add the migration file:
+   - alembic/versions/0002_widen_direction.py
+
+3) Run Alembic:
+   alembic upgrade head
+
+   (Alternatively, quick SQL: ALTER TABLE incidents MODIFY COLUMN direction VARCHAR(32) NULL;)
+
+4) Restart the app:
+   ./run_local.sh
+
+You should no longer see "Data too long for column 'direction'".

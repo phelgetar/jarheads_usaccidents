@@ -3,21 +3,22 @@
 ###################################################################
 # Project: USAccidents
 # File: usaccidents_app/connectors/ohio.py
-# Purpose: OHGO connector (robust JSON/type handling)
+# Purpose: OHGO connector (robust JSON/type handling + safe field lengths)
 #
 # Description of code and how it works:
-# - _get_json always returns parsed JSON (dict or list), or [] on failure.
-# - _as_items normalizes payload into a list of dicts.
-# - ingest_ohio_* skip any non-dict items safely.
+# - Normalizes payloads to list-of-dicts.
+# - Widened DB column for direction, but also clips values to model max length for safety.
+# - Header->query auth fallback and duplicate-path 404 retry remain.
 #
 # Author: Tim Canady
 # Created: 2025-09-28
 #
-# Version: 0.1.0
-# Last Modified: 2025-10-06 by Tim Canady
+# Version: 0.6.3
+# Last Modified: 2025-10-07 by Tim Canady
 #
 # Revision History:
-# - 0.1.0 (2025-10-06): Initial release of header patcher.
+# - 0.6.3 (2025-10-07): Clip direction to 32 chars to match widened schema.
+# - 0.6.2 (2025-10-06): Hardened parsing to avoid 'str' item errors.
 ###################################################################
 #
 from typing import Dict, List, Optional, Any
@@ -38,7 +39,6 @@ OHGO_INCIDENTS_PATH = os.getenv("OHGO_INCIDENTS_PATH", "/incidents")
 OHGO_ROADS_PATH = os.getenv("OHGO_ROADS_PATH", "/roads")
 APP_ENV = os.getenv("APP_ENV", "local").lower()
 
-
 def _build_url(base: str, path: Optional[str]) -> str:
     base = (base or "").strip()
     if not base.startswith(("http://", "https://")):
@@ -51,7 +51,6 @@ def _build_url(base: str, path: Optional[str]) -> str:
             base = base + seg
     return base
 
-
 async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Any:
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, params=params or {}, headers=headers or {})
@@ -60,7 +59,6 @@ async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: 
             qp["api-key"] = OHGO_API_KEY
             resp = await client.get(url, params=qp)
 
-        # Common duplication retry
         if resp.status_code == 404 and "/incidents/incidents" in str(resp.request.url):
             rebound = str(resp.request.url).replace("/incidents/incidents", "/incidents")
             resp = await client.get(rebound, params=params or {}, headers=headers or {})
@@ -69,7 +67,6 @@ async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: 
         try:
             return resp.json()
         except Exception:
-            # Try manual json loading from text
             try:
                 return json.loads(resp.text)
             except Exception:
@@ -77,11 +74,7 @@ async def _get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: 
                     print(f"[OHGO] Non-JSON response from {url[:120]}... -> returning []")
                 return []
 
-
 def _as_items(data: Any) -> List[Dict[str, Any]]:
-    """
-    Normalize various possible payload shapes into a list of dicts.
-    """
     if isinstance(data, dict):
         candidate = data.get("items", data.get("data", data.get("results", data)))
         if isinstance(candidate, list):
@@ -99,7 +92,6 @@ def _as_items(data: Any) -> List[Dict[str, Any]]:
             return []
     return []
 
-
 def _auth() -> Dict[str, Dict[str, str]]:
     headers: Dict[str, str] = {}
     params: Dict[str, str] = {}
@@ -108,6 +100,11 @@ def _auth() -> Dict[str, Dict[str, str]]:
         params["api-key"] = OHGO_API_KEY
     return {"headers": headers, "params": params}
 
+def _clip(val: Optional[str], maxlen: int) -> Optional[str]:
+    if val is None:
+        return None
+    s = str(val)
+    return s if len(s) <= maxlen else s[:maxlen]
 
 async def fetch_ohgo_incidents(page_size: int = 100) -> List[Dict[str, Any]]:
     url = _build_url(OHGO_BASE_URL, OHGO_INCIDENTS_PATH)
@@ -118,12 +115,11 @@ async def fetch_ohgo_incidents(page_size: int = 100) -> List[Dict[str, Any]]:
         print(f"[OHGO] fetched {len(items)} incidents from {url}")
     return items
 
-
 def ingest_ohio_incidents(db: Session, items: List[Dict[str, Any]]) -> int:
     count = 0
     for item in items:
         if not isinstance(item, dict):
-            continue  # skip bad shapes defensively
+            continue
         uuid = item.get("uuid") or f"ohgo:{item.get('id') or item.get('eventId')}"
         source_event_id = str(item.get("id") or item.get("eventId") or "")
         state = item.get("state") or "OH"
@@ -131,52 +127,56 @@ def ingest_ohio_incidents(db: Session, items: List[Dict[str, Any]]) -> int:
         route_class = item.get("routeClass")
 
         existing = db.query(Incident).filter(Incident.uuid == uuid).one_or_none()
+        common = dict(
+            source_system="OHGO",
+            source_event_id=source_event_id,
+            state=state,
+            route=route,
+            route_class=route_class,
+            direction=_clip(item.get("direction"), 32),  # match models.py
+            latitude=item.get("latitude"),
+            longitude=item.get("longitude"),
+            reported_time=_parse_dt(item.get("reportedTime")),
+            updated_time=_parse_dt(item.get("updatedTime")),
+            cleared_time=_parse_dt(item.get("clearedTime")),
+            is_active=item.get("isActive"),
+            event_type=item.get("eventType"),
+            lanes_affected=item.get("lanesAffected"),
+            closure_status=item.get("closureStatus"),
+            severity_flag=item.get("severityFlag"),
+            severity_score=item.get("severityScore"),
+        )
+
         if existing:
-            existing.source_system = "OHGO"
-            existing.source_event_id = source_event_id or existing.source_event_id
-            existing.state = state
-            existing.route = route
-            existing.route_class = route_class
-            existing.direction = item.get("direction")
-            existing.latitude = item.get("latitude")
-            existing.longitude = item.get("longitude")
-            existing.reported_time = _parse_dt(item.get("reportedTime"))
-            existing.updated_time = _parse_dt(item.get("updatedTime"))
-            existing.cleared_time = _parse_dt(item.get("clearedTime"))
-            existing.is_active = item.get("isActive")
-            existing.event_type = item.get("eventType")
-            existing.lanes_affected = item.get("lanesAffected")
-            existing.closure_status = item.get("closureStatus")
-            existing.severity_flag = item.get("severityFlag")
-            existing.severity_score = item.get("severityScore")
+            for k, v in common.items():
+                setattr(existing, k, v)
             existing.raw_blob = item
         else:
             db.add(Incident(
                 uuid=uuid,
-                source_system="OHGO",
-                source_event_id=source_event_id,
+                source_system=common["source_system"],
+                source_event_id=common["source_event_id"],
                 source_url=item.get("url"),
-                state=state,
-                route=route,
-                route_class=route_class,
-                direction=item.get("direction"),
-                latitude=item.get("latitude"),
-                longitude=item.get("longitude"),
-                reported_time=_parse_dt(item.get("reportedTime")),
-                updated_time=_parse_dt(item.get("updatedTime")),
-                cleared_time=_parse_dt(item.get("clearedTime")),
-                is_active=item.get("isActive"),
-                event_type=item.get("eventType"),
-                lanes_affected=item.get("lanesAffected"),
-                closure_status=item.get("closureStatus"),
-                severity_flag=item.get("severityFlag"),
-                severity_score=item.get("severityScore"),
+                state=common["state"],
+                route=common["route"],
+                route_class=common["route_class"],
+                direction=common["direction"],
+                latitude=common["latitude"],
+                longitude=common["longitude"],
+                reported_time=common["reported_time"],
+                updated_time=common["updated_time"],
+                cleared_time=common["cleared_time"],
+                is_active=common["is_active"],
+                event_type=common["event_type"],
+                lanes_affected=common["lanes_affected"],
+                closure_status=common["closure_status"],
+                severity_flag=common["severity_flag"],
+                severity_score=common["severity_score"],
                 raw_blob=item,
             ))
         count += 1
     db.commit()
     return count
-
 
 async def fetch_ohgo_roads() -> List[Dict[str, Any]]:
     url = _build_url(OHGO_BASE_URL, OHGO_ROADS_PATH)
@@ -186,7 +186,6 @@ async def fetch_ohgo_roads() -> List[Dict[str, Any]]:
     if APP_ENV in ("local", "dev", "debug"):
         print(f"[OHGO] fetched {len(items)} roads from {url}")
     return items
-
 
 def ingest_ohgo_roads(db: Session, items: List[Dict[str, Any]]) -> int:
     count = 0
@@ -199,7 +198,7 @@ def ingest_ohgo_roads(db: Session, items: List[Dict[str, Any]]) -> int:
         common = dict(
             name=item.get("name"),
             description=item.get("description"),
-            direction=item.get("direction"),
+            direction=_clip(item.get("direction"), 20),
             begin_mile=item.get("beginMile"),
             end_mile=item.get("endMile"),
             length=item.get("length"),
@@ -214,7 +213,6 @@ def ingest_ohgo_roads(db: Session, items: List[Dict[str, Any]]) -> int:
         count += 1
     db.commit()
     return count
-
 
 def _parse_dt(value: Optional[str]):
     if not value:

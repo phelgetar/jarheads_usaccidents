@@ -1,0 +1,13 @@
+# 1) drop the files in place (keeping your paths)
+#    usaccidents_app/models.py
+#    usaccidents_app/connectors/ohio.py
+#    alembic/versions/0002_widen_direction.py
+
+# 2) run the migration
+alembic upgrade head
+
+# (or quick SQL alternative)
+# mysql -h HOST -u USER -p DBNAME -e "ALTER TABLE incidents MODIFY COLUMN direction VARCHAR(32) NULL;"
+
+# 3) restart
+./run_local.sh
