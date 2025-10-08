@@ -14,20 +14,51 @@
 # - Ingest returns detailed counts when requested (inserted/updated/skipped).
 # - Incidents: supports page-all + region/bounds/radius filters; tolerant JSON parsing.
 # - Ingest: idempotent updates by checking uuid candidates + (source_system, source_event_id).
+# - Derivations: fills is_active and severity_score when OHGO omits them.
 # - API collectors: fetch cameras, construction, etc., using API-root normalization; skip 404s.
 #
 # Author: Tim Canady
 # Created: 2025-09-28
 #
-# Version: 0.9.1
+# Version: 0.9.2
 # Last Modified: 2025-10-08 by Tim Canady
 #
 # Revision History:
-# - 0.9.1 (2025-10-08): Rename ingest functions to ingest_ohgo_*; keep backward-compat aliases.
+# - 0.9.2 (2025-10-08): Derive is_active & severity_score when absent in payloads.
+# - 0.9.1 (2025-10-08): Rename ingest functions to ingest_ohgo_*; keep compat aliases.
 # - 0.9.0 (2025-10-08): Collector hardening (API-root normalize, 404 skip) + /collect support.
-# - 0.8.1 (2025-10-08): Duplicate-safe ingest (uuid candidates + composite key); std new uuid 'ohgo:<id>'.
+# - 0.8.1 (2025-10-08): Duplicate-safe ingest; standardize new uuid to 'ohgo:<id>'.
 # - 0.8.0 (2025-10-08): Full-fetch + filters + case-insensitive parsing.
 # - 0.6.3 (2025-10-07): Clip direction to 32 chars to match widened schema.
+###################################################################
+#
+#!/usr/bin/env python3
+#
+###################################################################
+# Project: USAccidents
+# File: usaccidents_app/connectors/ohio.py
+# Purpose: OHGO connector (full fetch, duplicate-safe ingest, collectors)
+#
+# Description of code and how it works:
+# - Incidents: supports page-all + region/bounds/radius filters; tolerant JSON parsing.
+# - Ingest: idempotent updates by checking uuid candidates + (source_system, source_event_id).
+# - Derivations: fills is_active and severity_score when OHGO omits them.
+# - Upserts: per-item commit + IntegrityError fallback to update (race-safe).
+# - API collectors: fetch cameras, construction, etc., using API-root normalization; skip 404s.
+#
+# Author: Tim Canady
+# Created: 2025-09-28
+#
+# Version: 0.9.3
+# Last Modified: 2025-10-08 by Tim Canady
+#
+# Revision History:
+# - 0.9.3 (2025-10-08): Per-item commit + IntegrityError fallback to prevent duplicate-key crashes.
+# - 0.9.2 (2025-10-08): Derive is_active & severity_score when absent in payloads.
+# - 0.9.1 (2025-10-08): Rename ingest functions to ingest_ohgo_*; keep compat aliases.
+# - 0.9.0 (2025-10-08): Collector hardening (API-root normalize, 404 skip) + /collect support.
+# - 0.8.1 (2025-10-08): Duplicate-safe ingest; new uuid standardized to 'ohgo:<id>'.
+# - 0.8.0 (2025-10-08): Full-fetch + filters + case-insensitive parsing.
 ###################################################################
 #
 from typing import Dict, List, Optional, Any
@@ -37,6 +68,7 @@ import httpx
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
+from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
 from ..models import Incident, Road
@@ -69,9 +101,7 @@ def _build_url(base: str, path: Optional[str]) -> str:
     return base
 
 def _api_root(base: str) -> str:
-    """
-    Return the API 'root' (e.g., https://.../api/v1) even if base ends with a resource like /incidents.
-    """
+    """Return the API root (e.g., https://.../api/v1) even if base ends with a resource like /incidents."""
     u = (base or "").rstrip("/")
     tail = u.rsplit("/", 1)[-1].lower()
     tails = {
@@ -167,17 +197,104 @@ def _extract_link(item: Dict[str, Any], rel: str) -> Optional[str]:
     return None
 
 
+# -------------------------- Derivations --------------------------
+
+_SEVERITY_TEXT_MAP = {
+    "severe": 3, "major": 3, "high": 3,
+    "moderate": 2, "medium": 2,
+    "minor": 1, "low": 1,
+}
+
+_STATUS_SCORE_MAP = {
+    "closed": 3,
+    "restricted": 2,
+    "incident": 2,
+    "delay": 2,
+    "active": 2,
+    "open": 1,
+    "cleared": 1,
+    "completed": 1,
+    "ended": 1,
+}
+
+_CATEGORY_SCORE_MAP = {
+    "crash": 3,
+    "accident": 3,
+    "work zone": 2,
+    "construction": 2,
+    "maintenance": 1,
+    "repairs/maintenance": 1,
+    "disabled vehicle": 1,
+    "hazard": 2,
+}
+
+def _derive_is_active(is_active: Optional[bool],
+                      cleared_time: Optional[str],
+                      end_time: Optional[str],
+                      status: Optional[str]) -> Optional[bool]:
+    if isinstance(is_active, bool):
+        return is_active
+    if cleared_time or end_time:
+        return False
+    if status:
+        s = str(status).strip().lower()
+        if s in {"cleared", "completed", "ended"}:
+            return False
+        if s in {"closed", "restricted", "incident", "delay", "active", "open"}:
+            return True
+    return True
+
+def _derive_severity(severity_score: Optional[Any],
+                     severity_flag: Optional[str],
+                     status: Optional[str],
+                     category: Optional[str]) -> (Optional[str], Optional[int]):
+    if severity_score is not None:
+        try:
+            return severity_flag, int(severity_score)
+        except Exception:
+            pass
+    if severity_flag:
+        score = _SEVERITY_TEXT_MAP.get(str(severity_flag).strip().lower())
+        if score:
+            return severity_flag, score
+    if status:
+        score = _STATUS_SCORE_MAP.get(str(status).strip().lower())
+        if score:
+            flag = severity_flag or status.title()
+            return flag, score
+    if category:
+        for key, score in _CATEGORY_SCORE_MAP.items():
+            if key in str(category).strip().lower():
+                flag = severity_flag or category.title()
+                return flag, score
+    return severity_flag, None
+
+
 # -------------------------- Incident normalize/fetch --------------------------
 
 def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
     props = item.get("properties")
     geom = item.get("geometry")
+
     if isinstance(props, dict):
         coords = (geom or {}).get("coordinates") if isinstance(geom, dict) else None
         lat = coords[1] if (isinstance(coords, list) and len(coords) > 1) else None
         lon = coords[0] if (isinstance(coords, list) and len(coords) > 0) else None
         route_name = props.get("routeName")
         route_class = "INTERSTATE" if str(route_name or "").startswith("I-") else "STATE"
+
+        raw_is_active = props.get("isActive")
+        start_time = props.get("startTime")
+        last_updated = props.get("lastUpdated")
+        end_time = props.get("endTime")
+        status = props.get("status") or props.get("roadStatus")
+        category = props.get("type") or props.get("category")
+        sev_flag = props.get("severity")
+        sev_score = props.get("severityScore")
+
+        is_active = _derive_is_active(raw_is_active, end_time, end_time, status)
+        sev_flag, sev_score = _derive_severity(sev_score, sev_flag, status, category)
+
         return {
             "uuid": item.get("id"),
             "id": item.get("id"),
@@ -187,18 +304,29 @@ def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
             "direction": props.get("direction"),
             "latitude": lat,
             "longitude": lon,
-            "reportedTime": props.get("startTime"),
-            "updatedTime": props.get("lastUpdated"),
-            "clearedTime": props.get("endTime"),
-            "isActive": props.get("isActive", True),
-            "eventType": props.get("type") or props.get("category"),
+            "reportedTime": start_time,
+            "updatedTime": last_updated,
+            "clearedTime": end_time,
+            "isActive": is_active,
+            "eventType": category,
             "lanesAffected": props.get("lanesAffected"),
-            "closureStatus": props.get("status") or props.get("roadStatus"),
-            "severityFlag": props.get("severity"),
-            "severityScore": props.get("severityScore"),
+            "closureStatus": status,
+            "severityFlag": sev_flag,
+            "severityScore": sev_score,
             "url": _extract_link(item, "self") or item.get("url"),
         }
+
     # flat form
+    status = item.get("roadStatus") or item.get("status")
+    category = item.get("category") or item.get("type")
+    end_time = item.get("clearedTime") or item.get("endTime")
+    raw_is_active = item.get("isActive")
+    sev_flag = item.get("severity")
+    sev_score = item.get("severityScore")
+
+    is_active = _derive_is_active(raw_is_active, end_time, end_time, status)
+    sev_flag, sev_score = _derive_severity(sev_score, sev_flag, status, category)
+
     return {
         "uuid": item.get("id"),
         "id": item.get("id"),
@@ -208,15 +336,15 @@ def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
         "direction": item.get("direction"),
         "latitude": item.get("latitude"),
         "longitude": item.get("longitude"),
-        "reportedTime": None,
-        "updatedTime": None,
-        "clearedTime": None,
-        "isActive": None,
-        "eventType": item.get("category") or item.get("type"),
-        "lanesAffected": None,
-        "closureStatus": item.get("roadStatus"),
-        "severityFlag": None,
-        "severityScore": None,
+        "reportedTime": item.get("reportedTime") or item.get("startTime"),
+        "updatedTime": item.get("updatedTime") or item.get("lastUpdated"),
+        "clearedTime": end_time,
+        "isActive": is_active,
+        "eventType": category,
+        "lanesAffected": item.get("lanesAffected"),
+        "closureStatus": status,
+        "severityFlag": sev_flag,
+        "severityScore": sev_score,
         "url": _extract_link(item, "self") or item.get("url"),
         "location": item.get("location"),
         "description": item.get("description"),
@@ -261,7 +389,7 @@ async def fetch_ohgo_incidents(page_size: int = 100, page_all: bool = True,
                 alt["pageSize"] = alt.pop("page-size")
             data = await _request_json(client, url, alt, auth["headers"])
 
-        items, meta = _as_items(data)
+        items, _meta = _as_items(data)
 
         if not page_all and isinstance(data, dict):
             all_items = list(items)
@@ -304,6 +432,12 @@ def _uuid_candidates(source_event_id: str, item_uuid: Optional[str]) -> List[str
         c.append(str(source_event_id))
         c.append(f"ohgo:{source_event_id}")
     return list(dict.fromkeys(c))
+
+def _apply_common(existing: Incident, common: Dict[str, Any], item: Dict[str, Any]):
+    for k, v in common.items():
+        setattr(existing, k, v)
+    existing.source_url = item.get("url")
+    existing.raw_blob = item
 
 def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detail: bool = False):
     inserted, updated, skipped = 0, 0, 0
@@ -351,29 +485,25 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
         )
 
         if existing:
-            snapshot = (
+            before = (
                 existing.state, existing.route, existing.route_class, existing.direction,
                 existing.latitude, existing.longitude, existing.reported_time, existing.updated_time,
                 existing.cleared_time, existing.is_active, existing.event_type, existing.lanes_affected,
                 existing.closure_status, existing.severity_flag, existing.severity_score
             )
-            for k, v in common.items():
-                setattr(existing, k, v)
-            existing.source_url = item.get("url")
-            existing.raw_blob = item
-            newshot = (
+            _apply_common(existing, common, item)
+            db.commit()  # per-item commit (safe under concurrency)
+            after = (
                 existing.state, existing.route, existing.route_class, existing.direction,
                 existing.latitude, existing.longitude, existing.reported_time, existing.updated_time,
                 existing.cleared_time, existing.is_active, existing.event_type, existing.lanes_affected,
                 existing.closure_status, existing.severity_flag, existing.severity_score
             )
-            if newshot != snapshot:
-                updated += 1
-            else:
-                skipped += 1
+            updated += 1 if after != before else 0
+            skipped += 1 if after == before else 0
         else:
             new_uuid = f"ohgo:{source_event_id}"
-            db.add(Incident(
+            row = Incident(
                 uuid=new_uuid,
                 source_system=common["source_system"],
                 source_event_id=common["source_event_id"],
@@ -394,13 +524,35 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
                 severity_flag=common["severity_flag"],
                 severity_score=common["severity_score"],
                 raw_blob=item,
-            ))
-            inserted += 1
+            )
+            db.add(row)
+            try:
+                db.commit()
+                inserted += 1
+            except IntegrityError:
+                # Another worker inserted it; convert to update.
+                db.rollback()
+                existing2 = (
+                    db.query(Incident)
+                      .filter(
+                          or_(
+                              Incident.uuid.in_(candidates + [new_uuid]),
+                              and_(Incident.source_system == "OHGO", Incident.source_event_id == source_event_id),
+                          )
+                      )
+                      .first()
+                )
+                if existing2:
+                    _apply_common(existing2, common, item)
+                    db.commit()
+                    updated += 1
+                else:
+                    # Shouldn't happen; skip to be safe.
+                    skipped += 1
 
-    db.commit()
     return {"inserted": inserted, "updated": updated, "skipped": skipped} if return_detail else (inserted + updated)
 
-# --- Backward-compat alias (old name) ---
+# Backward-compat alias
 ingest_ohio_incidents = ingest_ohgo_incidents
 
 
@@ -437,22 +589,18 @@ def ingest_ohgo_roads(db: Session, items: List[Dict[str, Any]]) -> int:
                 setattr(existing, k, v)
         else:
             db.add(Road(source_system=source_system, road_id=road_id, **common))
+        db.commit()
         count += 1
-    db.commit()
     return count
 
-# --- Backward-compat alias (old name) ---
+# Backward-compat alias
 ingest_ohio_roads = ingest_ohgo_roads
 
 
 # -------------------------- Generic collectors + "all" --------------------------
 
 async def _fetch_items(path: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """
-    Generic fetcher for non-incident endpoints.
-    Always builds from API root (not from /incidents).
-    Gracefully returns [] on 404 to avoid crashing the collector.
-    """
+    """Generic fetcher for non-incident endpoints from API root; returns [] on 404."""
     base_root = _api_root(OHGO_BASE_URL)
     url = _build_url(base_root, path)
     auth = _auth()

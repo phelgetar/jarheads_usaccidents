@@ -23,12 +23,36 @@
 # - 0.7.0 (2025-10-08): Add /ingest detail flag; robust startup scheduler.
 ###################################################################
 #
+#!/usr/bin/env python3
+#
+###################################################################
+# Project: USAccidents
+# File: usaccidents_app/main.py
+# Purpose: FastAPI app (incidents API, OHGO ingest, collector, active-count)
+#
+# Description of code and how it works:
+# - Scheduler: AsyncIOScheduler calls ingest coroutine directly every minute.
+# - MySQL-safe ordering helpers for latest/changed_since.
+# - Endpoints: ingest incidents/roads, collect OHGO, and live active_count.
+#
+# Author: Tim Canady
+# Created: 2025-09-28
+#
+# Version: 0.9.3
+# Last Modified: 2025-10-08 by Tim Canady
+#
+# Revision History:
+# - 0.9.3 (2025-10-08): Add /incidents/active_count and surface in web UI.
+# - 0.9.1 (2025-10-08): Switch to ingest_ohgo_* names.
+# - 0.9.0 (2025-10-08): Add /collect/ohio with resilient collectors.
+###################################################################
+#
 from typing import List, Optional
 from fastapi import FastAPI, Depends, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import case, desc
+from sqlalchemy import case, desc, or_, and_
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pathlib import Path
 import os
@@ -38,9 +62,9 @@ from .models import Incident
 from .schemas import IncidentOut
 from .connectors.ohio import (
     fetch_ohgo_incidents,
-    ingest_ohgo_incidents,   # <-- renamed
+    ingest_ohgo_incidents,
     fetch_ohgo_roads,
-    ingest_ohgo_roads,       # <-- renamed
+    ingest_ohgo_roads,
     fetch_ohgo_all,
 )
 
@@ -72,20 +96,18 @@ async def _startup():
     scheduler = AsyncIOScheduler()
 
     async def _scheduled_ohio_ingest():
-        # Import here to avoid circular
         from .database import SessionLocal
         try:
             items = await fetch_ohgo_incidents(page_all=True)
             db = SessionLocal()
             try:
-                ingest_ohgo_incidents(db, items, return_detail=False)  # <-- renamed
+                ingest_ohgo_incidents(db, items, return_detail=False)
             finally:
                 db.close()
         except Exception as e:
             print(f"[Scheduler] OHGO ingest error: {e}")
 
-    # Pass the coroutine directly (no asyncio.create_task)
-    scheduler.add_job(_scheduled_ohio_ingest, "interval", minutes=1)
+    scheduler.add_job(_scheduled_ohio_ingest, "interval", minutes=1)  # direct coro
     scheduler.start()
 
 @app.on_event("shutdown")
@@ -94,12 +116,26 @@ async def _shutdown():
         scheduler.shutdown(wait=False)
 
 def _mysql_nulls_last_desc(col):
-    # Emulate NULLS LAST for MySQL
     return (case((col.is_(None), 1), else_=0), desc(col))
 
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+@app.get("/incidents/active_count")
+async def incidents_active_count(db: Session = Depends(get_db)):
+    # Count active rows. Treat NULL is_active + NULL cleared_time as active (backfill safety).
+    cnt = (
+        db.query(Incident)
+          .filter(
+              or_(
+                  Incident.is_active.is_(True),
+                  and_(Incident.is_active.is_(None), Incident.cleared_time.is_(None)),
+              )
+          )
+          .count()
+    )
+    return {"active_count": cnt}
 
 @app.get("/incidents/latest", response_model=List[IncidentOut])
 async def incidents_latest(
@@ -127,7 +163,7 @@ async def incidents_changed_since(
     return q.all()
 
 @app.post("/ingest/ohio/fetch")
-async def ingest_ohgo_fetch(  # route path kept the same for compatibility
+async def ingest_ohgo_fetch(
     db: Session = Depends(get_db),
     page_size: int = Query(500, ge=1, le=2000, description="Ignored when page_all=true"),
     page_all: bool = Query(True, description="Use OHGO page-all to fetch complete set"),
@@ -145,7 +181,7 @@ async def ingest_ohgo_fetch(  # route path kept the same for compatibility
         bounds_ne=bounds_ne,
         radius=radius,
     )
-    result = ingest_ohgo_incidents(db, items, return_detail=detail)  # <-- renamed
+    result = ingest_ohgo_incidents(db, items, return_detail=detail)
     return {
         "ok": True,
         "filters": {"page_all": page_all, "region": region, "bounds_sw": bounds_sw, "bounds_ne": bounds_ne, "radius": radius},
@@ -153,11 +189,9 @@ async def ingest_ohgo_fetch(  # route path kept the same for compatibility
     }
 
 @app.post("/ingest/ohio/roads")
-async def ingest_ohgo_roads_endpoint(  # route path kept the same
-    db: Session = Depends(get_db)
-):
+async def ingest_ohgo_roads_endpoint(db: Session = Depends(get_db)):
     items = await fetch_ohgo_roads()
-    n = ingest_ohgo_roads(db, items)  # <-- renamed
+    n = ingest_ohgo_roads(db, items)
     return {"ok": True, "ingested": n}
 
 @app.get("/collect/ohio")
@@ -173,7 +207,6 @@ async def collect_ohio(
     bounds_ne: Optional[str] = None,
     radius: Optional[str] = None,
 ):
-    from .connectors.ohio import fetch_ohgo_all
     data = await fetch_ohgo_all(
         page_all=True,
         region=region,

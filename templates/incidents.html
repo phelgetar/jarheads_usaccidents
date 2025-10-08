@@ -1,75 +1,106 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>USAccidents – Incidents</title>
+  <meta charset="utf-8"/>
+  <title>{{ title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="stylesheet" href="/static/styles.css"/>
 </head>
 <body>
-  <header>
-    <h1>USAccidents – Incidents</h1>
-    <p>Filter by type, location, direction, and status.</p>
+  <header class="topbar">
+    <h1>USAccidents</h1>
+    <div class="status-pill">
+      <span>Active incidents:</span>
+      <strong id="activeCount">—</strong>
+    </div>
   </header>
 
-  <section id="filters">
-    <form id="filterForm">
-      <label>
-        Type:
-        <input type="text" name="event_type" placeholder="e.g., Crash, Construction"/>
-      </label>
-      <label>
-        Location:
-        <input type="text" name="location" placeholder="route/county/state"/>
-      </label>
-      <label>
-        Direction:
-        <select name="direction">
-          <option value="">Any</option>
-          <option>Northbound</option>
-          <option>Southbound</option>
-          <option>Eastbound</option>
-          <option>Westbound</option>
-          <option>Both Directions</option>
-        </select>
-      </label>
-      <label>
-        Status:
-        <select name="status">
-          <option value="any">Any</option>
-          <option value="active">Active</option>
-          <option value="cleared">Cleared</option>
-        </select>
-      </label>
-      <label>
-        State:
-        <input type="text" name="state" placeholder="OH" maxlength="2"/>
-      </label>
-      <label>
-        Limit:
-        <input type="number" name="limit" value="100" min="1" max="500"/>
-      </label>
-      <button type="submit">Apply</button>
-    </form>
-  </section>
+  <main class="content">
+    <section class="controls">
+      <button id="refreshBtn" type="button">Refresh Now</button>
+    </section>
 
-  <section id="results">
-    <table>
-      <thead>
-        <tr>
-          <th>UUID</th>
-          <th>Type</th>
-          <th>State</th>
-          <th>Route</th>
-          <th>Direction</th>
-          <th>Active</th>
-          <th>Updated</th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </section>
+    <section>
+      <h2>Latest Incidents</h2>
+      <div id="incidentsTable">Loading…</div>
+    </section>
+  </main>
 
   <script src="/static/app.js"></script>
 </body>
 </html>
+<!--<!DOCTYPE html>-->
+<!--<html lang="en">-->
+<!--<head>-->
+<!--  <meta charset="UTF-8" />-->
+<!--  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>-->
+<!--  <title>USAccidents – Incidents</title>-->
+<!--  <link rel="stylesheet" href="/static/styles.css"/>-->
+<!--</head>-->
+<!--<body>-->
+<!--  <header>-->
+<!--    <h1>USAccidents – Incidents</h1>-->
+<!--    <p>Filter by type, location, direction, and status.</p>-->
+<!--  </header>-->
+
+<!--  <section id="filters">-->
+<!--    <form id="filterForm">-->
+<!--      <label>-->
+<!--        Type:-->
+<!--        <input type="text" name="event_type" placeholder="e.g., Crash, Construction"/>-->
+<!--      </label>-->
+<!--      <label>-->
+<!--        Location:-->
+<!--        <input type="text" name="location" placeholder="route/county/state"/>-->
+<!--      </label>-->
+<!--      <label>-->
+<!--        Direction:-->
+<!--        <select name="direction">-->
+<!--          <option value="">Any</option>-->
+<!--          <option>Northbound</option>-->
+<!--          <option>Southbound</option>-->
+<!--          <option>Eastbound</option>-->
+<!--          <option>Westbound</option>-->
+<!--          <option>Both Directions</option>-->
+<!--        </select>-->
+<!--      </label>-->
+<!--      <label>-->
+<!--        Status:-->
+<!--        <select name="status">-->
+<!--          <option value="any">Any</option>-->
+<!--          <option value="active">Active</option>-->
+<!--          <option value="cleared">Cleared</option>-->
+<!--        </select>-->
+<!--      </label>-->
+<!--      <label>-->
+<!--        State:-->
+<!--        <input type="text" name="state" placeholder="OH" maxlength="2"/>-->
+<!--      </label>-->
+<!--      <label>-->
+<!--        Limit:-->
+<!--        <input type="number" name="limit" value="100" min="1" max="500"/>-->
+<!--      </label>-->
+<!--      <button type="submit">Apply</button>-->
+<!--    </form>-->
+<!--  </section>-->
+
+<!--  <section id="results">-->
+<!--    <table>-->
+<!--      <thead>-->
+<!--        <tr>-->
+<!--          <th>UUID</th>-->
+<!--          <th>Type</th>-->
+<!--          <th>State</th>-->
+<!--          <th>Route</th>-->
+<!--          <th>Direction</th>-->
+<!--          <th>Active</th>-->
+<!--          <th>Updated</th>-->
+<!--        </tr>-->
+<!--      </thead>-->
+<!--      <tbody id="rows"></tbody>-->
+<!--    </table>-->
+<!--  </section>-->
+
+<!--  <script src="/static/app.js"></script>-->
+<!--</body>-->
+<!--</html>-->
