@@ -5,102 +5,120 @@
   <title>{{ title }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="stylesheet" href="/static/styles.css"/>
+  <style>
+    /* minimal layout helpers in case styles.css is absent/outdated */
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid #e5e7eb; }
+    .status-pill { background:#eef2ff; border:1px solid #c7d2fe; border-radius:999px; padding:6px 10px; font-size:14px; }
+    .container { padding:16px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:12px; }
+    .card { border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff; }
+    .controls { display:flex; gap:8px; flex-wrap: wrap; align-items: center; }
+    .table { width:100%; border-collapse: collapse; margin-top:10px; }
+    .table th, .table td { border:1px solid #e5e7eb; padding:6px 8px; text-align:left; font-size:14px; }
+    .footer { display:flex; justify-content: space-between; align-items:center; margin-top:8px; font-size:13px; color:#555; }
+    select[multiple] { min-height: 120px; }
+    .muted { color:#6b7280; }
+  </style>
 </head>
 <body>
   <header class="topbar">
-    <h1>USAccidents</h1>
+    <div style="display:flex; gap:16px; align-items:center;">
+      <h1 style="margin:0">USAccidents</h1>
+      <nav class="nav">
+        <a href="/web/incidents">Incidents</a>
+        <a href="/web/logs">Logs</a>
+      </nav>
+    </div>
     <div class="status-pill">
       <span>Active incidents:</span>
       <strong id="activeCount">—</strong>
     </div>
   </header>
 
-  <main class="content">
-    <section class="controls">
-      <button id="refreshBtn" type="button">Refresh Now</button>
+  <div class="container">
+    <section class="card">
+      <h2 style="margin-top:0">Filters</h2>
+      <div class="grid" id="filtersGrid">
+        <!-- Dynamic facet-driven controls go here -->
+        <div>
+          <label><strong>State</strong></label><br/>
+          <select id="f_state" multiple></select>
+        </div>
+        <div>
+          <label><strong>County</strong></label><br/>
+          <select id="f_county" multiple></select>
+        </div>
+        <div>
+          <label><strong>Route</strong></label><br/>
+          <select id="f_route" multiple></select>
+        </div>
+        <div>
+          <label><strong>Route Class</strong></label><br/>
+          <select id="f_route_class" multiple></select>
+        </div>
+        <div>
+          <label><strong>Direction</strong></label><br/>
+          <select id="f_direction" multiple></select>
+        </div>
+        <div>
+          <label><strong>Event Type</strong></label><br/>
+          <select id="f_event_type" multiple></select>
+        </div>
+        <div>
+          <label><strong>Closure Status</strong></label><br/>
+          <select id="f_closure_status" multiple></select>
+        </div>
+        <div>
+          <label><strong>Severity Flag</strong></label><br/>
+          <select id="f_severity_flag" multiple></select>
+        </div>
+        <div>
+          <label><strong>Severity Score</strong> <span class="muted">(min/max)</span></label><br/>
+          <input id="f_sevmin" type="number" min="0" step="1" style="width:45%"/>
+          <input id="f_sevmax" type="number" min="0" step="1" style="width:45%"/>
+        </div>
+        <div>
+          <label><strong>Updated Since</strong></label><br/>
+          <input id="f_updated_since" type="datetime-local"/>
+        </div>
+        <div>
+          <label><strong>Reported Since</strong></label><br/>
+          <input id="f_reported_since" type="datetime-local"/>
+        </div>
+        <div>
+          <label><strong>Active Only</strong></label><br/>
+          <input id="f_active_only" type="checkbox" checked/>
+        </div>
+      </div>
+
+      <div class="controls" style="margin-top:12px">
+        <label>Order</label>
+        <select id="f_order">
+          <option value="updated_time_desc">Updated (newest)</option>
+          <option value="reported_time_desc">Reported (newest)</option>
+          <option value="severity_desc">Severity (high→low)</option>
+        </select>
+
+        <label>Limit</label>
+        <input id="f_limit" type="number" min="1" max="1000" value="200" style="width:90px"/>
+
+        <button id="applyBtn" type="button">Apply Filters</button>
+        <button id="resetBtn" type="button">Reset</button>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
     </section>
 
-    <section>
-      <h2>Latest Incidents</h2>
-      <div id="incidentsTable">Loading…</div>
+    <section class="card">
+      <h2 style="margin-top:0">Results</h2>
+      <div class="footer">
+        <div>Total: <strong id="resTotal">0</strong> • Showing: <strong id="resCount">0</strong></div>
+        <div id="queryEcho" class="muted"></div>
+      </div>
+      <div id="incidentsTable" style="margin-top:8px">Loading…</div>
     </section>
-  </main>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
 </html>
-<!--<!DOCTYPE html>-->
-<!--<html lang="en">-->
-<!--<head>-->
-<!--  <meta charset="UTF-8" />-->
-<!--  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>-->
-<!--  <title>USAccidents – Incidents</title>-->
-<!--  <link rel="stylesheet" href="/static/styles.css"/>-->
-<!--</head>-->
-<!--<body>-->
-<!--  <header>-->
-<!--    <h1>USAccidents – Incidents</h1>-->
-<!--    <p>Filter by type, location, direction, and status.</p>-->
-<!--  </header>-->
-
-<!--  <section id="filters">-->
-<!--    <form id="filterForm">-->
-<!--      <label>-->
-<!--        Type:-->
-<!--        <input type="text" name="event_type" placeholder="e.g., Crash, Construction"/>-->
-<!--      </label>-->
-<!--      <label>-->
-<!--        Location:-->
-<!--        <input type="text" name="location" placeholder="route/county/state"/>-->
-<!--      </label>-->
-<!--      <label>-->
-<!--        Direction:-->
-<!--        <select name="direction">-->
-<!--          <option value="">Any</option>-->
-<!--          <option>Northbound</option>-->
-<!--          <option>Southbound</option>-->
-<!--          <option>Eastbound</option>-->
-<!--          <option>Westbound</option>-->
-<!--          <option>Both Directions</option>-->
-<!--        </select>-->
-<!--      </label>-->
-<!--      <label>-->
-<!--        Status:-->
-<!--        <select name="status">-->
-<!--          <option value="any">Any</option>-->
-<!--          <option value="active">Active</option>-->
-<!--          <option value="cleared">Cleared</option>-->
-<!--        </select>-->
-<!--      </label>-->
-<!--      <label>-->
-<!--        State:-->
-<!--        <input type="text" name="state" placeholder="OH" maxlength="2"/>-->
-<!--      </label>-->
-<!--      <label>-->
-<!--        Limit:-->
-<!--        <input type="number" name="limit" value="100" min="1" max="500"/>-->
-<!--      </label>-->
-<!--      <button type="submit">Apply</button>-->
-<!--    </form>-->
-<!--  </section>-->
-
-<!--  <section id="results">-->
-<!--    <table>-->
-<!--      <thead>-->
-<!--        <tr>-->
-<!--          <th>UUID</th>-->
-<!--          <th>Type</th>-->
-<!--          <th>State</th>-->
-<!--          <th>Route</th>-->
-<!--          <th>Direction</th>-->
-<!--          <th>Active</th>-->
-<!--          <th>Updated</th>-->
-<!--        </tr>-->
-<!--      </thead>-->
-<!--      <tbody id="rows"></tbody>-->
-<!--    </table>-->
-<!--  </section>-->
-
-<!--  <script src="/static/app.js"></script>-->
-<!--</body>-->
-<!--</html>-->
