@@ -45,6 +45,11 @@ from .connectors.ohio import (
     ingest_ohgo_roads,
     fetch_ohgo_all,
 )
+from .connectors.texas import (
+    fetch_texas_incidents,
+    ingest_texas_incidents,
+)
+
 
 # Initialize logging early
 logger = setup_logging()
@@ -269,6 +274,15 @@ async def ingest_ohgo_roads_endpoint(db: Session = Depends(get_db)):
     n = ingest_ohgo_roads(db, items)
     logger.info("[SYNC] roads_success source=OHGO count=%d duration_sec=%.3f", n, (datetime.utcnow() - start).total_seconds())
     return {"ok": True, "ingested": n}
+
+@app.post("/ingest/texas/fetch")
+async def ingest_texas_fetch(
+    detail: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    items = await fetch_texas_incidents()
+    result = ingest_texas_incidents(db, items, return_detail=detail)
+    return {"ok": True, "result": result, "count": len(items)}
 
 @app.get("/collect/ohio")
 async def collect_ohio(
