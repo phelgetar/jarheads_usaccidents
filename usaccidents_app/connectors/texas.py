@@ -7,9 +7,9 @@
 #
 # Description of code and how it works:
 # - Calls DriveTexas GeoJSON API with API key from env.
-# - Normalizes features -> flat incident dicts.
-# - Defensive parsing for property name variants seen in logs.
-# - Upsert logic returns inserted/updated/skipped counts.
+# - Normalizes features -> flat incident dicts compatible with models.Incident.
+# - Defensive parsing for property name variants seen in DriveTexas feeds.
+# - Idempotent upserts keyed by (source_system, source_event_id) with uuid fallback.
 #
 # Author: Tim Canady
 # Created: 2025-10-14
@@ -22,6 +22,7 @@
 ###################################################################
 #
 from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Tuple
 import os
 import json
@@ -31,12 +32,14 @@ from sqlalchemy.orm import Session
 
 from ..models import Incident
 
-# Env/config
+# ----------------------- ENV / CONFIG ------------------------
+
 DRIVETEXAS_API_KEY = os.getenv("DRIVETEXAS_API_KEY") or os.getenv("DRIVE_TEXAS_API_KEY")
 DRIVETEXAS_BASE_URL = os.getenv("DRIVETEXAS_BASE_URL", "https://api.drivetexas.org/api/conditions.geojson")
 APP_ENV = (os.getenv("APP_ENV") or "local").lower()
 
-# ------------ helpers ------------
+
+# ----------------------- HELPERS -----------------------------
 
 def _iso_to_dt(value: Optional[str]):
     if not value:
@@ -44,13 +47,11 @@ def _iso_to_dt(value: Optional[str]):
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
-        # Some DriveTexas timestamps may be like "2025-10-09T18:02:00.000"
         try:
-            if "." in value and not value.endswith("Z"):
-                return datetime.fromisoformat(value)
+            # tolerate fractional seconds without Z
+            return datetime.fromisoformat(value)
         except Exception:
             return None
-    return None
 
 def _clip(s: Optional[str], n: int) -> Optional[str]:
     if s is None:
@@ -66,39 +67,32 @@ def _get(d: Dict[str, Any], *keys, default=None):
 
 def _compute_active(cleared_time: Optional[datetime]) -> Optional[bool]:
     if cleared_time is None:
-        # Active if we don't know an end time yet
         return True
     return cleared_time > datetime.utcnow()
 
 def _severity_from_flags(props: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
     """
-    Map DriveTexas properties to severity_flag / severity_score (coarse).
-    - delay_flag: 'true' -> MEDIUM
-    - if description mentions 'closed' -> HIGH
+    Rough mapping from DriveTexas flags to severity.
     """
-    desc = str(_get(props, "description", default="") or "").lower()
-    delay_flag = str(_get(props, "delay_flag", default="") or "").lower()
+    desc = str(_get(props, "description", "DESCRIPTION", default="") or "").lower()
+    delay_flag = str(_get(props, "delay_flag", "DELAY_FLAG", default="") or "").lower()
 
-    flag = None
-    score = None
+    flag: Optional[str] = None
+    score: Optional[int] = None
 
     if "closed" in desc:
-        flag = "HIGH"
-        score = 3
+        flag, score = "HIGH", 3
     elif delay_flag in ("true", "1", "yes"):
-        flag = "MEDIUM"
-        score = 2
+        flag, score = "MEDIUM", 2
     elif "lane blocked" in desc or "shoulder blocked" in desc:
-        flag = "MEDIUM"
-        score = 2
+        flag, score = "MEDIUM", 2
     elif desc:
-        flag = "LOW"
-        score = 1
+        flag, score = "LOW", 1
 
     return flag, score
 
 def _closure_status_from_desc(props: Dict[str, Any]) -> Optional[str]:
-    desc = str(_get(props, "description", default="") or "").lower()
+    desc = str(_get(props, "description", "DESCRIPTION", default="") or "").lower()
     if "closed" in desc:
         return "CLOSED"
     if "lane blocked" in desc or "shoulder blocked" in desc:
@@ -109,19 +103,15 @@ def _closure_status_from_desc(props: Dict[str, Any]) -> Optional[str]:
 
 def _normalize_feature(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    DriveTexas GeoJSON feature -> flat dict compatible with Incident.
-    Properties commonly observed (from your TS/PHP + logs):
-      - GLOBALID, Identifier
-      - route_name
-      - travel_direction
-      - from_ref_marker (mile marker as string/number)
-      - start_time, end_time, create_time
-      - description, condition, delay_flag
-      - county_num (code)
-    Geometry: Point -> coordinates [lon, lat]
+    DriveTexas GeoJSON feature -> normalized dict for ingestion.
+    Observed properties:
+      GLOBALID / Identifier (id), route_name, travel_direction, from_ref_marker,
+      start_time, end_time, create_time, description, condition, delay_flag, county_num
+    Geometry: Point -> [lon, lat]
     """
     if not isinstance(feature, dict):
         return None
+
     props = feature.get("properties") or {}
     geom = feature.get("geometry") or {}
     coords = geom.get("coordinates") or []
@@ -134,18 +124,16 @@ def _normalize_feature(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not source_id:
         return None
 
-    route = _get(props, "route_name", "ROUTE_NAME", default=None)
-    direction = _get(props, "travel_direction", "DIRECTION", default=None)
+    route = _get(props, "route_name", "ROUTE_NAME")
+    direction = _get(props, "travel_direction", "DIRECTION")
 
-    # times
     reported = _iso_to_dt(_get(props, "start_time", "START_TIME"))
-    updated = _iso_to_dt(_get(props, "create_time", "CREATE_TIME", "start_time"))
+    updated = _iso_to_dt(_get(props, "create_time", "CREATE_TIME", "start_time", "START_TIME"))
     cleared = _iso_to_dt(_get(props, "end_time", "END_TIME"))
-
     is_active = _compute_active(cleared)
 
     event_type = _get(props, "condition", "CONDITION", default="Unknown")
-    milepost_raw = _get(props, "from_ref_marker", "FROM_REF_MARKER", default=None)
+    milepost_raw = _get(props, "from_ref_marker", "FROM_REF_MARKER")
     try:
         milepost = float(milepost_raw) if milepost_raw is not None else None
     except Exception:
@@ -154,47 +142,39 @@ def _normalize_feature(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     closure_status = _closure_status_from_desc(props)
     severity_flag, severity_score = _severity_from_flags(props)
 
-    # Build incident shape
     obj = {
-        # Identifiers (uuid must be unique; use a deterministic 'drivetexas:' prefix)
         "uuid": f"drivetexas:{source_id}",
         "id": str(source_id),
         "source_system": "DRIVETEXAS",
         "source_event_id": str(source_id),
-        # Location / route
         "state": "TX",
-        "county": _get(props, "county_num", "COUNTY_NUM", default=None),
+        "county": _get(props, "county_num", "COUNTY_NUM"),
         "route": route,
         "routeClass": None,
-        "direction": direction,
+        "direction": _clip(direction, 32),
         "milepost": milepost,
         "latitude": float(lat) if lat is not None else None,
         "longitude": float(lon) if lon is not None else None,
-        # Timing
         "reportedTime": reported.isoformat() if reported else None,
         "updatedTime": updated.isoformat() if updated else None,
         "clearedTime": cleared.isoformat() if cleared else None,
         "isActive": is_active,
-        # Semantics
         "eventType": event_type,
-        "lanesAffected": _get(props, "description", "DESCRIPTION", default=None),
+        "lanesAffected": _get(props, "description", "DESCRIPTION"),
         "closureStatus": closure_status,
         "severityFlag": severity_flag,
         "severityScore": severity_score,
-        # url (no per-incident permalink in this API)
         "url": None,
-        # raw
         "_raw": {"properties": props, "geometry": geom},
     }
-    # clip direction to DB width safety (models often use 32)
-    obj["direction"] = _clip(obj["direction"], 32)
     return obj
 
-# ------------ fetch ------------
+
+# ----------------------- FETCH -------------------------------
 
 async def fetch_texas_incidents() -> List[Dict[str, Any]]:
     """
-    Fetch DriveTexas GeoJSON and return normalized list-of-dicts.
+    Call DriveTexas GeoJSON and return normalized list-of-dicts.
     """
     if not DRIVETEXAS_API_KEY:
         if APP_ENV in ("local", "dev", "debug"):
@@ -206,13 +186,8 @@ async def fetch_texas_incidents() -> List[Dict[str, Any]]:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, params=params, headers={"Accept": "application/json", "User-Agent": "USAccidents/DriveTexas"})
-        # If they ever move auth to header, keep a fallback:
-        if resp.status_code == 401:
-            # nothing else we can do without a valid key
-            resp.raise_for_status()
         if resp.status_code != 200:
             resp.raise_for_status()
-
         try:
             data = resp.json()
         except Exception:
@@ -229,13 +204,13 @@ async def fetch_texas_incidents() -> List[Dict[str, Any]]:
         print(f"[TEXAS] fetched {len(items)} incidents from {url}")
     return items
 
-# ------------ ingest ------------
+
+# ----------------------- INGEST ------------------------------
 
 def ingest_texas_incidents(db: Session, items: List[Dict[str, Any]], return_detail: bool = True):
     """
-    Upsert into incidents table.
-    - Unique keys we target: uuid and (source_system, source_event_id)
-    - Returns counts: inserted / updated / skipped
+    Upsert into incidents table. Uses (source_system, source_event_id) and uuid fallback.
+    Returns inserted/updated/skipped.
     """
     inserted = updated = skipped = 0
 
@@ -254,7 +229,6 @@ def ingest_texas_incidents(db: Session, items: List[Dict[str, Any]], return_deta
               .filter(Incident.source_system == "DRIVETEXAS", Incident.source_event_id == source_event_id)
               .one_or_none()
         )
-        # If not by (source_system, source_event_id), try by uuid
         if not existing and uuid:
             existing = db.query(Incident).filter(Incident.uuid == uuid).one_or_none()
 
@@ -281,7 +255,6 @@ def ingest_texas_incidents(db: Session, items: List[Dict[str, Any]], return_deta
         )
 
         if existing:
-            # idempotent update
             for k, v in common.items():
                 setattr(existing, k, v)
             existing.raw_blob = item.get("_raw") or item
