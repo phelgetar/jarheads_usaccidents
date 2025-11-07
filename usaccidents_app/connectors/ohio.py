@@ -14,6 +14,7 @@
 # - API Result wrapper parsed **case-insensitively** (handles Results/links/TotalResultCount).
 # - Falls back across param styles: kebab-case → camelCase for page-all/page-size/page.
 # - Collects link[rel=self] as source_url; maps OHGO “Category/RouteName/RoadStatus” to our fields.
+# - **Dates**: fills missing per-incident times from feed `lastUpdated`, and preserves DB first-seen.
 # - Ingest returns detailed counts when requested (inserted/updated/skipped).
 # - Incidents: supports page-all + region/bounds/radius filters; tolerant JSON parsing.
 # - Ingest: idempotent updates by checking uuid candidates + (source_system, source_event_id).
@@ -24,10 +25,11 @@
 # Author: Tim Canady
 # Created: 2025-09-28
 #
-# Version: 0.10.0
-# Last Modified: 2025-10-08 by Tim Canady
+# Version: 0.10.1
+# Last Modified: 2025-10-22 by Tim Canady
 #
 # Revision History:
+# - 0.10.1 (2025-10-22): Inject feed `lastUpdated` into incidents; preserve DB reported_time; now() fallback.
 # - 0.10.0 (2025-10-09): Add fetch_ohgo_all + generic collectors with base-path fix.
 # - 0.9.4 (2025-10-09): Replace prints with structured logger; add fetch/ingest diagnostics.
 # - 0.9.3 (2025-10-08): Upserts with per-item commit + IntegrityError fallback.
@@ -45,7 +47,7 @@ import os
 import json
 import httpx
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 from sqlalchemy.exc import IntegrityError
@@ -77,16 +79,11 @@ def _build_url(base: str, path: Optional[str]) -> str:
     seg = (path or "").strip()
     if seg:
         seg = "/" + seg.lstrip("/")
-        # avoid double-appending if base already ends with seg
         if not base.lower().endswith(seg.lower()):
             base = base + seg
     return base
 
 def _api_root(base: str) -> str:
-    """
-    If base ends with a resource (e.g., /incidents), return its parent (true API root).
-    Prevents building /incidents/construction.
-    """
     u = (base or "").rstrip("/")
     tail = u.rsplit("/", 1)[-1].lower()
     known = {
@@ -108,11 +105,9 @@ def _auth() -> Dict[str, Dict[str, str]]:
 
 async def _request_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any], headers: Dict[str, str]) -> Any:
     resp = await client.get(url, params=params, headers=headers or {})
-    # header -> query fallback
     if resp.status_code in (401, 403) and OHGO_API_KEY:
         qp = dict(params); qp["api-key"] = OHGO_API_KEY
         resp = await client.get(url, params=qp)
-    # duplicate path guard
     if resp.status_code == 404 and "/incidents/incidents" in str(resp.request.url):
         rebound = str(resp.request.url).replace("/incidents/incidents", "/incidents")
         resp = await client.get(rebound, params=params, headers=headers or {})
@@ -138,9 +133,9 @@ def _as_items(data: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         for k in ("Results","items","data","results","incidents","content","value"):
             val = _ci_get(data, k)
             if isinstance(val, list):
-                for mk in ("TotalResultCount","CurrentResultCount","TotalPageCount","LastUpdated"):
+                for mk in ("TotalResultCount","CurrentResultCount","TotalPageCount","LastUpdated","lastUpdated"):
                     mv = _ci_get(data, mk)
-                    if mv is not None: meta[mk] = mv
+                    if mv is not None: meta["LastUpdated"] = mv
                 return [x for x in val if isinstance(x, dict)], meta
             if isinstance(val, dict):
                 return [val], meta
@@ -171,6 +166,9 @@ def _parse_dt(value: Optional[str]):
     except Exception:
         return None
 
+def _utcnow():
+    return datetime.now(timezone.utc)
+
 def _extract_link(item: Dict[str, Any], rel: str) -> Optional[str]:
     links = item.get("links") or item.get("Links") or []
     if isinstance(links, list):
@@ -178,6 +176,11 @@ def _extract_link(item: Dict[str, Any], rel: str) -> Optional[str]:
             if isinstance(ln, dict) and (ln.get("rel") or ln.get("Rel")) == rel:
                 return ln.get("href") or ln.get("Href")
     return None
+
+def _detail_url(incident_id: Optional[str]) -> Optional[str]:
+    if not incident_id:
+        return None
+    return _build_url(OHGO_BASE_URL, OHGO_INCIDENTS_PATH).rstrip("/") + f"/{incident_id}"
 
 # ---- derived fields -----------------------------------------------------------
 
@@ -248,7 +251,10 @@ def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
             "closureStatus": status,
             "severityFlag": sev_flag,
             "severityScore": sev_score,
-            "url": _extract_link(item, "self") or item.get("url"),
+            "url": _extract_link(item, "self") or item.get("url") or _detail_url(item.get("id")),
+            "location": props.get("location"),
+            "description": props.get("description"),
+            "roadClosureDetails": props.get("roadClosureDetails"),
         }
 
     # Flat-ish
@@ -263,13 +269,13 @@ def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
         "uuid": item.get("id"),
         "id": item.get("id"),
         "state": item.get("state") or "OH",
-        "route": item.get("routeName"),
-        "routeClass": ("INTERSTATE" if str(item.get("routeName") or "").startswith("I-") else "STATE"),
+        "route": item.get("routeName") or item.get("roadwayName"),
+        "routeClass": ("INTERSTATE" if str(item.get("routeName") or item.get("roadwayName") or "").startswith("I-") else "STATE"),
         "direction": item.get("direction"),
         "latitude": item.get("latitude"),
         "longitude": item.get("longitude"),
-        "reportedTime": item.get("reportedTime") or item.get("startTime"),
-        "updatedTime": item.get("updatedTime") or item.get("lastUpdated"),
+        "reportedTime": item.get("reportedTime") or item.get("startTime") or item.get("startDateTime"),
+        "updatedTime": item.get("updatedTime") or item.get("lastUpdated") or item.get("lastUpdatedTime"),
         "clearedTime": end_time,
         "isActive": is_active,
         "eventType": category,
@@ -277,7 +283,7 @@ def _normalize_incident(item: Dict[str, Any]) -> Dict[str, Any]:
         "closureStatus": status,
         "severityFlag": sev_flag,
         "severityScore": sev_score,
-        "url": _extract_link(item, "self") or item.get("url"),
+        "url": _extract_link(item, "self") or item.get("url") or _detail_url(item.get("id")),
         "location": item.get("location"),
         "description": item.get("description"),
         "roadClosureDetails": item.get("roadClosureDetails"),
@@ -313,16 +319,18 @@ async def fetch_ohgo_incidents(page_size: int = 100, page_all: bool = True,
     log.info("[OHGO] fetch incidents start url=%s params=%s",
              url, {k: v for k, v in params.items() if k != "api-key"})
 
+    feed_last_updated: Optional[str] = None
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         data = await _request_json(client, url, params, auth["headers"])
-        # try camelCase for some deployments
         if isinstance(data, dict) and ("Error" in data or "error" in data) and page_all:
             alt = dict(params); alt.pop("page-all", None); alt["pageAll"] = "true"
             data = await _request_json(client, url, alt, auth["headers"])
 
         items, meta = _as_items(data)
+        feed_last_updated = meta.get("LastUpdated")
 
-        # Manual pagination if not page-all and meta says there are more pages
+        # Manual pagination (rarely needed for page-all)
         if not page_all and isinstance(data, dict):
             all_items = list(items)
             page_num = int(params.get("page", 1)) if str(params.get("page", 1)).isdigit() else 1
@@ -346,6 +354,13 @@ async def fetch_ohgo_incidents(page_size: int = 100, page_all: bool = True,
         if not isinstance(raw, dict):
             continue
         norm = _normalize_incident(raw)
+
+        # ---- NEW: inject feed lastUpdated if per-incident times are missing
+        if not norm.get("updatedTime") and feed_last_updated:
+            norm["updatedTime"] = feed_last_updated
+        if not norm.get("reportedTime") and norm.get("updatedTime"):
+            norm["reportedTime"] = norm["updatedTime"]
+
         norm["direction"] = _clip(norm.get("direction"), 32)
         out.append(norm)
 
@@ -387,6 +402,19 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
                                   and_(Incident.source_system == "OHGO", Incident.source_event_id == source_event_id)))
                       .first())
 
+        # Parse incoming times
+        reported_time = _parse_dt(item.get("reportedTime"))
+        updated_time = _parse_dt(item.get("updatedTime"))
+        cleared_time = _parse_dt(item.get("clearedTime"))
+
+        # Preserve first-seen (reported_time) if we already have it
+        if existing and existing.reported_time and reported_time is None:
+            reported_time = existing.reported_time
+
+        # If still no updated_time, use now() so dashboard displays something meaningful
+        if updated_time is None:
+            updated_time = _utcnow()
+
         common = dict(
             source_system="OHGO",
             source_event_id=source_event_id,
@@ -396,9 +424,9 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
             direction=_clip(item.get("direction"), 32),
             latitude=item.get("latitude"),
             longitude=item.get("longitude"),
-            reported_time=_parse_dt(item.get("reportedTime")),
-            updated_time=_parse_dt(item.get("updatedTime")),
-            cleared_time=_parse_dt(item.get("clearedTime")),
+            reported_time=reported_time,
+            updated_time=updated_time,
+            cleared_time=cleared_time,
             is_active=item.get("isActive"),
             event_type=item.get("eventType"),
             lanes_affected=item.get("lanesAffected"),
@@ -412,6 +440,10 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
             db.commit()
             updated += 1
         else:
+            # For brand new rows, if reported_time is still None, set it equal to updated_time (first seen)
+            if common["reported_time"] is None:
+                common["reported_time"] = common["updated_time"]
+
             new_uuid = f"ohgo:{source_event_id}"
             row = Incident(
                 uuid=new_uuid,
@@ -459,7 +491,7 @@ def ingest_ohgo_incidents(db: Session, items: List[Dict[str, Any]], return_detai
         log.info("[OHGO] ingest result processed=%d", inserted + updated)
         return inserted + updated
 
-# Back-compat alias (main app prefers ingest_ohgo_incidents)
+# Back-compat alias (main app may still import the old name)
 ingest_ohio_incidents = ingest_ohgo_incidents
 
 # ---- roads -------------------------------------------------------------------
@@ -512,12 +544,9 @@ async def _fetch_items(endpoint: str, filters: Dict[str, Any]) -> List[Dict[str,
     url = _build_url(root, endpoint)
     auth = _auth()
     q = {}
-
-    # pass-through supported filters
     for k in ("region", "map-bounds-sw", "map-bounds-ne", "radius", "page-all", "pageAll"):
         if k in filters and filters[k] is not None:
             q[k] = filters[k]
-
     async with httpx.AsyncClient(timeout=30.0) as client:
         data = await _request_json(client, url, q, auth["headers"])
     items, _ = _as_items(data)
@@ -545,7 +574,6 @@ async def fetch_ohgo_weather_sensor_sites(filters: Optional[Dict[str, Any]] = No
     return await _fetch_items("/weather-sensor-sites", filters or {})
 
 async def fetch_ohgo_work_zones_wzdx(filters: Optional[Dict[str, Any]] = None) -> Any:
-    # Some deployments return a GeoJSON FeatureCollection for work zones
     root = _api_root(OHGO_BASE_URL)
     url = _build_url(root, "/work-zones")
     auth = _auth()
@@ -555,7 +583,6 @@ async def fetch_ohgo_work_zones_wzdx(filters: Optional[Dict[str, Any]] = None) -
             q[k] = filters[k]
     async with httpx.AsyncClient(timeout=30.0) as client:
         data = await _request_json(client, url, q, auth["headers"])
-    # return raw for GeoJSON
     return data
 
 async def fetch_ohgo_all(
@@ -566,13 +593,6 @@ async def fetch_ohgo_all(
     radius: Optional[str] = None,
     include: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Collects multiple OHGO datasets. By default (include=None) returns ONLY incidents
-    to avoid 404s from unknown deployments. Pass include list to fetch extras:
-      incidents, construction, digital_signs, cameras, travel_delays,
-      dangerous_slowdowns, truck_parking, weather_sensor_sites, work_zones_wzdx
-    """
-    # Always fetch incidents first
     incidents = await fetch_ohgo_incidents(
         page_all=page_all,
         region=region,
@@ -582,7 +602,6 @@ async def fetch_ohgo_all(
     )
     out: Dict[str, Any] = {"incidents": incidents}
 
-    # If no extras requested, return now
     if not include:
         log.info("[OHGO] collect (incidents only) count=%d", len(incidents))
         return out
@@ -598,7 +617,6 @@ async def fetch_ohgo_all(
     if radius:
         filters["radius"] = radius
 
-    # Map include token -> function
     fetch_map = {
         "construction": fetch_ohgo_construction,
         "digital_signs": fetch_ohgo_digital_signs,
@@ -622,7 +640,6 @@ async def fetch_ohgo_all(
             else:
                 log.info("[OHGO] collect %s type=%s", key, type(out[key]).__name__)
         except httpx.HTTPStatusError as e:
-            # 404 (endpoint not enabled on this deployment) → return empty
             if e.response is not None and e.response.status_code == 404:
                 log.warning("[OHGO] collect %s 404 (omitting)", key)
                 out[key] = []

@@ -23,7 +23,18 @@
 # - 0.11.0 (2025-10-09): Added robust ordering helpers; expanded UI endpoints.
 ###################################################################
 #
-
+#!/usr/bin/env python3
+#
+###################################################################
+# Project: USAccidents
+# File: usaccidents_app/main.py
+# Purpose: FastAPI app (API + web UI + scheduler)
+#
+# Description:
+# - Serves the Incidents web UI and a live log viewer.
+# - Provides incidents search/facets/active_count plus latest/changed_since.
+# - Includes OHGO + DriveTexas ingest endpoints and a scheduler.
+###################################################################
 from __future__ import annotations
 
 import os
@@ -285,7 +296,7 @@ def incidents_search(
     return {"ok": True, "total": int(total), "count": len(items), "items": items}
 
 # ------------------------------------------------------------------------------
-# Additional incidents endpoints (as per original spec)
+# Additional incidents endpoints
 # ------------------------------------------------------------------------------
 
 @app.get("/incidents/latest")
@@ -350,7 +361,7 @@ def healthz():
     return {"ok": True, "ts": datetime.utcnow().isoformat() + "Z"}
 
 # ------------------------------------------------------------------------------
-# OHGO ingest endpoints (existing)
+# OHGO ingest endpoints
 # ------------------------------------------------------------------------------
 
 @app.post("/ingest/ohio/fetch")
@@ -391,20 +402,17 @@ async def ingest_ohio_roads(
     return {"ok": True, "processed": int(n)}
 
 # ------------------------------------------------------------------------------
-# DriveTexas ingest endpoints (new)
+# DriveTexas ingest endpoints
 # ------------------------------------------------------------------------------
 
 @app.post("/ingest/texas/fetch")
-async def ingest_texas_fetch(
-    detail: bool = Query(default=True),
-    db: Session = Depends(get_db),
-):
+async def ingest_texas_fetch(detail: bool = False, db: Session = Depends(get_db)):
     items = await fetch_texas_incidents()
     result = ingest_texas_incidents(db, items, return_detail=detail)
-    return {"ok": True, "count": len(items), "result": result}
+    return {"ok": True, "result": result}
 
 # ------------------------------------------------------------------------------
-# Collector (optional helper)
+# Collector (OH only for now)
 # ------------------------------------------------------------------------------
 
 @app.get("/collect/ohio")
